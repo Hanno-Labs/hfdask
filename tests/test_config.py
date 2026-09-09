@@ -22,27 +22,44 @@ from hfdask.runner import run
 
 
 def yaml_config(**overrides):
-    return {"namespace": "example", "environment": {"image": "image"},
-            "network": {"public_relays": True}, **overrides}
+    return {
+        "namespace": "example",
+        "environment": {"image": "image"},
+        "network": {"public_relays": True},
+        **overrides,
+    }
 
 
-@pytest.mark.parametrize("value,location", [
-    (None, ()), ([], ()), ({1: "bad"}, (1,)),
-    (yaml_config(unknown=True), ("unknown",)),
-    (yaml_config(coordinator={"unknown": True}), ("coordinator", "unknown")),
-    (yaml_config(workers={"unknown": True}), ("workers", "unknown")),
-    (yaml_config(environment={"image": "image", "unknown": True}), ("environment", "unknown")),
-    (yaml_config(network={"public_relays": True, "unknown": True}), ("network", "unknown")),
-    (yaml_config(mounts=[{"source": "hf://buckets/a/b", "target": "/data", "unknown": True}]),
-     ("mounts", 0, "unknown")),
-    (yaml_config(namespace=" \t"), ("namespace",)),
-    (yaml_config(workers=None), ("workers",)),
-    (yaml_config(mounts={}), ("mounts",)),
-    (yaml_config(environment={"image": "image", "extras": "inference"}),
-     ("environment", "extras")),
-    (yaml_config(environment={"image": "image", "extras": ["--bad"]}),
-     ("environment", "extras", 0)),
-])
+@pytest.mark.parametrize(
+    "value,location",
+    [
+        (None, ()),
+        ([], ()),
+        ({1: "bad"}, (1,)),
+        (yaml_config(unknown=True), ("unknown",)),
+        (yaml_config(coordinator={"unknown": True}), ("coordinator", "unknown")),
+        (yaml_config(workers={"unknown": True}), ("workers", "unknown")),
+        (yaml_config(environment={"image": "image", "unknown": True}), ("environment", "unknown")),
+        (yaml_config(network={"public_relays": True, "unknown": True}), ("network", "unknown")),
+        (
+            yaml_config(
+                mounts=[{"source": "hf://buckets/a/b", "target": "/data", "unknown": True}]
+            ),
+            ("mounts", 0, "unknown"),
+        ),
+        (yaml_config(namespace=" \t"), ("namespace",)),
+        (yaml_config(workers=None), ("workers",)),
+        (yaml_config(mounts={}), ("mounts",)),
+        (
+            yaml_config(environment={"image": "image", "extras": "inference"}),
+            ("environment", "extras"),
+        ),
+        (
+            yaml_config(environment={"image": "image", "extras": ["--bad"]}),
+            ("environment", "extras", 0),
+        ),
+    ],
+)
 def test_yaml_shape_and_unknown_keys(value, location):
     with pytest.raises(ValidationError) as caught:
         ClusterConfig.model_validate(value)
@@ -109,27 +126,48 @@ def test_dataclass_api_and_volume_compatibility():
     assert replace(WorkerGroup("cpu-basic"), count=2).count == 2
 
 
-@pytest.mark.parametrize("options", [
-    {"count": True}, {"count": 1.5}, {"count": 0}, {"flavor": " "},
-    {"tags": ("GPU_FAKE",)}, {"tags": ("FLAVOR_fake",)}, {"tags": ("HAS_GPU",)},
-    {"tags": ("",)}, {"tags": "custom"},
-])
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"count": True},
+        {"count": 1.5},
+        {"count": 0},
+        {"flavor": " "},
+        {"tags": ("GPU_FAKE",)},
+        {"tags": ("FLAVOR_fake",)},
+        {"tags": ("HAS_GPU",)},
+        {"tags": ("",)},
+        {"tags": "custom"},
+    ],
+)
 def test_worker_group_validation(options):
     with pytest.raises(ValidationError):
         WorkerGroup(**{"flavor": "cpu-basic", **options})
 
 
-@pytest.mark.parametrize("options", [
-    {"startup_timeout": True}, {"startup_timeout": 1.5}, {"startup_timeout": 0},
-    {"startup_timeout": float("inf")}, {"scheduler_worker": "false"},
-    {"public_relays": "true"}, {"relay_urls": ["http://relay"]},
-    {"relay_urls": ["https://relay"]}, {"scheduler_flavor": " "},
-])
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"startup_timeout": True},
+        {"startup_timeout": 1.5},
+        {"startup_timeout": 0},
+        {"startup_timeout": float("inf")},
+        {"scheduler_worker": "false"},
+        {"public_relays": "true"},
+        {"relay_urls": ["http://relay"]},
+        {"relay_urls": ["https://relay"]},
+        {"scheduler_flavor": " "},
+    ],
+)
 def test_invalid_launch_options_never_submit(options):
     api = MagicMock()
     with pytest.raises(ValidationError):
-        submit_cluster(JobSpec("example", "image", "workload:run"), [], api=api,
-                       **{"public_relays": True, **options})
+        submit_cluster(
+            JobSpec("example", "image", "workload:run"),
+            [],
+            api=api,
+            **{"public_relays": True, **options},
+        )
     api.run_job.assert_not_called()
 
 
@@ -141,11 +179,19 @@ def test_relay_policy():
         RelayConfig(public_relays=True, relays=["https://relay"])
 
 
-@pytest.mark.parametrize("options", [
-    {"timeout": float("nan")}, {"timeout": float("inf")}, {"timeout": -1},
-    {"timeout": True}, {"poll_interval": 0}, {"poll_interval": float("nan")},
-    {"poll_interval": float("inf")}, {"poll_interval": "5"},
-])
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"timeout": float("nan")},
+        {"timeout": float("inf")},
+        {"timeout": -1},
+        {"timeout": True},
+        {"poll_interval": 0},
+        {"poll_interval": float("nan")},
+        {"poll_interval": float("inf")},
+        {"poll_interval": "5"},
+    ],
+)
 def test_wait_validation_before_api_calls(options):
     api = MagicMock()
     job = Job("job", "example", api)
@@ -157,16 +203,36 @@ def test_wait_validation_before_api_calls(options):
 
 
 def connection(**overrides):
-    return {"schema": 1, "persistent": True, "job_nodes": 1, "peers": ["server", "client"],
-            "scheduler_worker": True, "public_relays": True, "relays": [], **overrides}
+    return {
+        "schema": 1,
+        "persistent": True,
+        "job_nodes": 1,
+        "peers": ["server", "client"],
+        "scheduler_worker": True,
+        "public_relays": True,
+        "relays": [],
+        **overrides,
+    }
 
 
-@pytest.mark.parametrize("value", [None, {}, connection(schema=True), connection(persistent=1),
-    connection(persistent=False),
-    connection(job_nodes=True), connection(job_nodes=65), connection(peers=["client", "client"]),
-    connection(peers=["client"]), connection(scheduler_worker="false"),
-    connection(public_relays="false"), connection(relays=["http://relay"]),
-    connection(public_relays=False)])
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        {},
+        connection(schema=True),
+        connection(persistent=1),
+        connection(persistent=False),
+        connection(job_nodes=True),
+        connection(job_nodes=65),
+        connection(peers=["client", "client"]),
+        connection(peers=["client"]),
+        connection(scheduler_worker="false"),
+        connection(public_relays="false"),
+        connection(relays=["http://relay"]),
+        connection(public_relays=False),
+    ],
+)
 def test_invalid_manifest_never_starts_transport(monkeypatch, value):
     serve = MagicMock()
     monkeypatch.setattr("hfdask.client._serve", serve)
@@ -176,35 +242,60 @@ def test_invalid_manifest_never_starts_transport(monkeypatch, value):
 
 
 def test_connection_accepts_runner_metadata():
-    config = ConnectionConfig.model_validate(connection(node_flavors=["cpu-basic"], schema_future=2))
+    config = ConnectionConfig.model_validate(
+        connection(node_flavors=["cpu-basic"], schema_future=2)
+    )
     assert config.job_nodes == 1
 
 
-@pytest.mark.parametrize("options", [
-    {"index": True}, {"base_port": True}, {"base_port": 1023}, {"base_port": 65536},
-    {"max_connections": True}, {"max_connections": 0}, {"max_connections": 1.5},
-    {"bind_host": "0.0.0.0"}, {"services": (True,)}, {"services": (-1,)},
-])
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"index": True},
+        {"base_port": True},
+        {"base_port": 1023},
+        {"base_port": 65536},
+        {"max_connections": True},
+        {"max_connections": 0},
+        {"max_connections": 1.5},
+        {"bind_host": "0.0.0.0"},
+        {"services": (True,)},
+        {"services": (-1,)},
+    ],
+)
 def test_mesh_configuration(options):
     with pytest.raises(ValidationError):
-        MeshConfig(**{"index": 0, "services": (0,), "peers": (b"own",),
-                      "endpoint_id": b"own", **options})
+        MeshConfig(
+            **{"index": 0, "services": (0,), "peers": (b"own",), "endpoint_id": b"own", **options}
+        )
 
 
-@pytest.mark.parametrize("workers,keys,options,message", [
-    (64, [], {}, "At most 64"),
-    (1, [], {}, "one identity per Job"),
-    (1, [Identity(b"a" * 32)] * 2, {}, "distinct identity"),
-    (1, [], {"worker_groups": []}, "worker_groups"),
-    (1, [], {"worker_groups": [WorkerGroup("cpu-basic")], "worker_flavor": "cpu-basic"},
-     "instead of worker_flavor"),
-])
+@pytest.mark.parametrize(
+    "workers,keys,options,message",
+    [
+        (64, [], {}, "At most 64"),
+        (1, [], {}, "one identity per Job"),
+        (1, [Identity(b"a" * 32)] * 2, {}, "distinct identity"),
+        (1, [], {"worker_groups": []}, "worker_groups"),
+        (
+            1,
+            [],
+            {"worker_groups": [WorkerGroup("cpu-basic")], "worker_flavor": "cpu-basic"},
+            "instead of worker_flavor",
+        ),
+    ],
+)
 def test_launch_planning_guards_remain(monkeypatch, workers, keys, options, message):
     monkeypatch.setattr(Identity, "public_id", lambda self: self.secret.hex())
     api = MagicMock()
     with pytest.raises(ValueError, match=message):
-        submit_cluster(JobSpec("example", "image", "workload:run", workers=workers), keys,
-                       public_relays=True, api=api, **options)
+        submit_cluster(
+            JobSpec("example", "image", "workload:run", workers=workers),
+            keys,
+            public_relays=True,
+            api=api,
+            **options,
+        )
     api.run_job.assert_not_called()
 
 
@@ -216,23 +307,36 @@ def test_runner_rejects_counts_before_cluster_start(monkeypatch):
     cluster.assert_not_called()
 
 
-@pytest.mark.parametrize("options,message", [
-    ({"services": (1,)}, "service"),
-    ({"index": 1}, "index"),
-    ({"base_port": 65535}, "port"),
-    ({"peers": (b"own", b"own")}, "distinct identity"),
-    ({"endpoint_id": b"other"}, "endpoint identity"),
-])
+@pytest.mark.parametrize(
+    "options,message",
+    [
+        ({"services": (1,)}, "service"),
+        ({"index": 1}, "index"),
+        ({"base_port": 65535}, "port"),
+        ({"peers": (b"own", b"own")}, "distinct identity"),
+        ({"endpoint_id": b"other"}, "endpoint identity"),
+    ],
+)
 def test_focused_mesh_invariants(options, message):
     with pytest.raises(ValidationError, match=message):
-        MeshConfig(**{"index": 0, "services": (0,), "peers": (b"own",),
-                      "endpoint_id": b"own", **options})
+        MeshConfig(
+            **{"index": 0, "services": (0,), "peers": (b"own",), "endpoint_id": b"own", **options}
+        )
 
 
-@pytest.mark.parametrize("options", [
-    {"nodes": True}, {"nodes": 0}, {"node": True}, {"node": -1}, {"node": 2},
-    {"ordinal": True}, {"ordinal": -1}, {"ordinal": 16},
-])
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"nodes": True},
+        {"nodes": 0},
+        {"node": True},
+        {"node": -1},
+        {"node": 2},
+        {"ordinal": True},
+        {"ordinal": -1},
+        {"ordinal": 16},
+    ],
+)
 def test_strict_service_indices(options):
     with pytest.raises(ValidationError):
         ServiceConfig(**{"nodes": 2, "node": 0, "ordinal": 0, **options})
@@ -246,34 +350,56 @@ def test_launch_limit_precedes_topology_expansion(monkeypatch):
 
     monkeypatch.setattr(LaunchPlan, "node_flavors", property(expanded))
     with pytest.raises(ValidationError, match="At most 64"):
-        submit_cluster(JobSpec("example", "image", "workload:run", workers=10**12), [],
-                       public_relays=True, api=MagicMock())
+        submit_cluster(
+            JobSpec("example", "image", "workload:run", workers=10**12),
+            [],
+            public_relays=True,
+            api=MagicMock(),
+        )
 
 
 def test_launch_plan_excludes_secret_material(monkeypatch):
     from hfdask.cluster import LaunchPlan
 
     monkeypatch.setattr(Identity, "public_id", lambda self: self.secret.hex())
-    plan = LaunchPlan(spec=JobSpec("example", "image", "workload:run", workers=1),
-                      identities=(Identity(b"a" * 32), Identity(b"b" * 32)), public_relays=True)
+    plan = LaunchPlan(
+        spec=JobSpec("example", "image", "workload:run", workers=1),
+        identities=(Identity(b"a" * 32), Identity(b"b" * 32)),
+        public_relays=True,
+    )
     assert "identities" not in plan.model_dump()
     assert "secret" not in repr(plan)
     assert "client_identity" not in plan.model_dump()
 
 
-@pytest.mark.parametrize("options", [
-    {"node": True}, {"node": 2}, {"job_nodes": None},
-    {"startup_timeout": 0}, {"startup_timeout": True},
-    {"peers": ["same", "same"]}, {"hardware_detection": "true"},
-    {"node_flavors": ["cpu-basic"]}, {"node_tags": [[]]},
-])
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"node": True},
+        {"node": 2},
+        {"job_nodes": None},
+        {"startup_timeout": 0},
+        {"startup_timeout": True},
+        {"peers": ["same", "same"]},
+        {"hardware_detection": "true"},
+        {"node_flavors": ["cpu-basic"]},
+        {"node_tags": [[]]},
+    ],
+)
 def test_runner_mesh_configuration(options):
     with pytest.raises(ValidationError):
-        RunnerMeshConfig.model_validate({
-            "node": 0, "peers": ["scheduler", "worker"], "public_relays": True,
-            "relays": [], "startup_timeout": 1200, "hardware_detection": True,
-            "node_flavors": ["cpu-basic", "cpu-basic"], **options,
-        })
+        RunnerMeshConfig.model_validate(
+            {
+                "node": 0,
+                "peers": ["scheduler", "worker"],
+                "public_relays": True,
+                "relays": [],
+                "startup_timeout": 1200,
+                "hardware_detection": True,
+                "node_flavors": ["cpu-basic", "cpu-basic"],
+                **options,
+            }
+        )
 
 
 @pytest.mark.parametrize("persistent", [False, True])
@@ -284,7 +410,8 @@ def test_launch_wire_configuration_validates(monkeypatch, persistent):
     plan = LaunchPlan(
         spec=JobSpec("example", "image", "" if persistent else "workload:run", workers=1),
         identities=(Identity(b"a" * 32), Identity(b"b" * 32)),
-        client_identity=Identity(b"c" * 32) if persistent else None, public_relays=True,
+        client_identity=Identity(b"c" * 32) if persistent else None,
+        public_relays=True,
     )
     for node in range(plan.node_count):
         wire = RunnerMeshConfig.model_validate({**plan.connection, "node": node})
@@ -302,26 +429,44 @@ def test_invalid_runner_mesh_never_binds_endpoint(monkeypatch):
     bind = AsyncMock()
     monkeypatch.setattr("iroh.Endpoint.bind", bind)
     monkeypatch.setenv("HFDASK_NODE_KEY", "not consumed for invalid config")
-    args = Namespace(entrypoint="workload:run", workers=1, threads_per_worker=1,
-                     memory_limit="auto", node=2, mesh=json.dumps({
-                         "peers": ["server"], "public_relays": True,
-                         "relays": [], "startup_timeout": 1200,
-                     }))
+    args = Namespace(
+        entrypoint="workload:run",
+        workers=1,
+        threads_per_worker=1,
+        memory_limit="auto",
+        node=2,
+        mesh=json.dumps(
+            {
+                "peers": ["server"],
+                "public_relays": True,
+                "relays": [],
+                "startup_timeout": 1200,
+            }
+        ),
+    )
     with pytest.raises(ValidationError, match="roster"):
         asyncio.run(run_mesh(args, {}))
     bind.assert_not_called()
 
 
 def test_runner_mesh_accepts_legacy_and_persistent_metadata():
-    legacy = RunnerMeshConfig.model_validate({
-        "node": 0, "peers": ["scheduler", "worker"], "public_relays": True,
-        "relays": [], "startup_timeout": 1200,
-    })
+    legacy = RunnerMeshConfig.model_validate(
+        {
+            "node": 0,
+            "peers": ["scheduler", "worker"],
+            "public_relays": True,
+            "relays": [],
+            "startup_timeout": 1200,
+        }
+    )
     assert legacy.nodes == 2
     assert "job_nodes" not in legacy.model_dump(exclude_unset=True)
     assert "node" not in legacy.model_dump()
-    persistent = RunnerMeshConfig.model_validate(connection(
-        node=0, startup_timeout=1200, hardware_detection=True, node_flavors=["cpu-basic"]))
+    persistent = RunnerMeshConfig.model_validate(
+        connection(
+            node=0, startup_timeout=1200, hardware_detection=True, node_flavors=["cpu-basic"]
+        )
+    )
     assert persistent.nodes == 1
 
 

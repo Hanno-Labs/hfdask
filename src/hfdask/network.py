@@ -31,9 +31,11 @@ def authorized(peer_id: bytes, roster: Sequence[bytes]) -> bool:
     return peer_id in roster
 
 
-async def bridge(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
-                 stream: iroh.BiStream) -> None:
+async def bridge(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, stream: iroh.BiStream
+) -> None:
     """Preserve backpressure and half-close; never buffer the whole payload."""
+
     async def upload() -> None:
         while data := await reader.read(CHUNK_SIZE):
             await stream.send().write_all(data)
@@ -68,15 +70,28 @@ class Mesh:
     allowing a node to host both scheduler and worker without sharing listeners.
     """
 
-    def __init__(self, endpoint: iroh.Endpoint, peers: Sequence[iroh.EndpointAddr],
-                 index: int, *, base_port: int = 21000, max_connections: int = 256,
-                 bind_host: str = "127.0.0.1",
-                 services: Sequence[int] | None = None) -> None:
+    def __init__(
+        self,
+        endpoint: iroh.Endpoint,
+        peers: Sequence[iroh.EndpointAddr],
+        index: int,
+        *,
+        base_port: int = 21000,
+        max_connections: int = 256,
+        bind_host: str = "127.0.0.1",
+        services: Sequence[int] | None = None,
+    ) -> None:
         owners = tuple(range(len(peers))) if services is None else tuple(services)
         ids = [peer.id().to_bytes() for peer in peers]
-        MeshConfig(index=index, base_port=base_port, max_connections=max_connections,
-                   bind_host=bind_host, services=owners, peers=tuple(ids),
-                   endpoint_id=endpoint.id().to_bytes())
+        MeshConfig(
+            index=index,
+            base_port=base_port,
+            max_connections=max_connections,
+            bind_host=bind_host,
+            services=owners,
+            peers=tuple(ids),
+            endpoint_id=endpoint.id().to_bytes(),
+        )
         self.endpoint = endpoint
         self.peers = tuple(peers)
         self.ids = ids
@@ -92,16 +107,21 @@ class Mesh:
     def spawn(self, coroutine: Coroutine[Any, Any, None]) -> None:
         task = asyncio.create_task(coroutine)
         self.tasks.add(task)
+
         def finished(done: asyncio.Task[None]) -> None:
             self.tasks.discard(done)
             if not done.cancelled() and (error := done.exception()) is not None:
                 logger.warning("mesh stream failed: %s", type(error).__name__)
+
         task.add_done_callback(finished)
 
     def require_file_descriptor_budget(self) -> None:
         proxy_count = sum(owner != self.index for owner in self.services)
         soft_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
-        if soft_limit != resource.RLIM_INFINITY and proxy_count + 2 * self.max_connections + 64 > soft_limit:
+        if (
+            soft_limit != resource.RLIM_INFINITY
+            and proxy_count + 2 * self.max_connections + 64 > soft_limit
+        ):
             raise RuntimeError("File descriptor limit is too low for the configured mesh")
 
     def require_owned_service(self, service: int) -> None:
@@ -114,22 +134,27 @@ class Mesh:
             for index, owner in enumerate(self.services):
                 if owner == self.index:
                     continue
-                def accepted(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
-                             target: int = index) -> None:
+
+                def accepted(
+                    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, target: int = index
+                ) -> None:
                     if len(self.tasks) >= self.max_connections:
                         writer.close()
                     else:
                         self.spawn(self.outgoing(target, reader, writer))
-                self.servers.append(await asyncio.start_server(
-                    accepted, self.bind_host, self.base_port + index))
+
+                self.servers.append(
+                    await asyncio.start_server(accepted, self.bind_host, self.base_port + index)
+                )
             self.accept_task = asyncio.create_task(self.accept())
             return self
         except BaseException:
             await self.close()
             raise
 
-    async def outgoing(self, index: int, reader: asyncio.StreamReader,
-                       writer: asyncio.StreamWriter) -> None:
+    async def outgoing(
+        self, index: int, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
         connection = None
         try:
             async with asyncio.timeout(30):
@@ -169,7 +194,8 @@ class Mesh:
                 service = int.from_bytes(await stream.recv().read_exact(2), "big")
                 self.require_owned_service(service)
                 reader, writer = await asyncio.open_connection(
-                    self.bind_host, self.base_port + service)
+                    self.bind_host, self.base_port + service
+                )
             try:
                 await stream.send().write_all(b"K")
                 await bridge(reader, writer, stream)

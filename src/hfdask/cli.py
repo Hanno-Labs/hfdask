@@ -36,9 +36,25 @@ MAX_FILES = 2000
 
 def _secret_path(path: PurePosixPath) -> bool:
     return any(
-        part in {".git", ".venv", ".ssh", ".aws", ".gnupg", ".hfdask", "mise.local.toml",
-                 ".mise.local.toml", ".netrc", ".pypirc", "credentials", "credentials.json",
-                 "id_rsa", "id_ed25519", "secrets", ".secrets"}
+        part
+        in {
+            ".git",
+            ".venv",
+            ".ssh",
+            ".aws",
+            ".gnupg",
+            ".hfdask",
+            "mise.local.toml",
+            ".mise.local.toml",
+            ".netrc",
+            ".pypirc",
+            "credentials",
+            "credentials.json",
+            "id_rsa",
+            "id_ed25519",
+            "secrets",
+            ".secrets",
+        }
         or part.startswith((".env", "secrets."))
         or part.endswith((".env", ".pem", ".key", ".p12", ".pfx"))
         for part in path.parts
@@ -55,8 +71,7 @@ def require_safe_project_file(root: Path, name: str) -> Path | None:
     for part in relative.parts:
         candidate = candidate / part
         if candidate.is_symlink():
-            raise ValueError(f"Project symlinks are not supported: {name}; "
-                             "exclude with .gitignore")
+            raise ValueError(f"Project symlinks are not supported: {name}; exclude with .gitignore")
     if not candidate.exists():  # Tracked files may be deleted in the working tree.
         return None
     if not stat.S_ISREG(candidate.stat().st_mode):
@@ -66,21 +81,27 @@ def require_safe_project_file(root: Path, name: str) -> Path | None:
 
 def require_source_budget(total: int, file_count: int) -> None:
     if total > MAX_SOURCE_BYTES or file_count > MAX_FILES:
-        raise ValueError("Project source exceeds 8 MiB/2000 files; move data to bucket mounts "
-                         "and exclude generated files with .gitignore")
+        raise ValueError(
+            "Project source exceeds 8 MiB/2000 files; move data to bucket mounts "
+            "and exclude generated files with .gitignore"
+        )
 
 
 def require_project_inputs(files: dict[str, bytes], script: str) -> None:
     for required in ("pyproject.toml", "uv.lock", script):
         if required not in files:
-            raise ValueError(f"Required project file {required} is missing or excluded; "
-                             "run uv lock and check .gitignore")
+            raise ValueError(
+                f"Required project file {required} is missing or excluded; "
+                "run uv lock and check .gitignore"
+            )
 
 
 def require_upload_budget(payload: bytes) -> bytes:
     if len(payload) > MAX_ARCHIVE_BYTES:
-        raise ValueError("Compressed source exceeds 8 MiB upload limit; move data to bucket "
-                         "mounts and exclude generated files with .gitignore")
+        raise ValueError(
+            "Compressed source exceeds 8 MiB upload limit; move data to bucket "
+            "mounts and exclude generated files with .gitignore"
+        )
     return payload
 
 
@@ -91,13 +112,19 @@ def package_project(root: Path, script: str, extras: list[str]) -> bytes:
     try:
         selected = subprocess.run(
             ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", "."],
-            cwd=root, check=True, capture_output=True,
+            cwd=root,
+            check=True,
+            capture_output=True,
         ).stdout.split(b"\0")
         # --exclude-standard only filters untracked files; also exclude ignored tracked files.
-        ignored = set(subprocess.run(
-            ["git", "ls-files", "--cached", "--ignored", "--exclude-standard", "-z", "--", "."],
-            cwd=root, check=True, capture_output=True,
-        ).stdout.split(b"\0"))
+        ignored = set(
+            subprocess.run(
+                ["git", "ls-files", "--cached", "--ignored", "--exclude-standard", "-z", "--", "."],
+                cwd=root,
+                check=True,
+                capture_output=True,
+            ).stdout.split(b"\0")
+        )
     except (OSError, subprocess.CalledProcessError) as error:
         raise ValueError("Run from a Git project containing pyproject.toml and uv.lock") from error
     files: dict[str, bytes] = {}
@@ -128,8 +155,10 @@ def package_project(root: Path, script: str, extras: list[str]) -> bytes:
 
 def require_private_source_bucket(api: HfApi, bucket_id: str) -> None:
     if api.bucket_info(bucket_id).private is not True:
-        raise ValueError(f"Source bucket {bucket_id} must be verified private; "
-                         "refusing upload without changing visibility")
+        raise ValueError(
+            f"Source bucket {bucket_id} must be verified private; "
+            "refusing upload without changing visibility"
+        )
 
 
 def prepare_spec(spec: JobSpec, root: Path, script: str, extras: list[str], api: HfApi) -> JobSpec:
@@ -141,19 +170,43 @@ def prepare_spec(spec: JobSpec, root: Path, script: str, extras: list[str], api:
     api.create_bucket(bucket_id, private=True, exist_ok=True)
     require_private_source_bucket(api, bucket_id)
     bootstrap = files("hfdask").joinpath("bootstrap.py").read_bytes()
-    api.batch_bucket_files(bucket_id, add=[
-        (payload, remote_path), (bootstrap, f"{folder}/bootstrap.py"),
-    ])
-    print(f"Source artifact: hf://buckets/{bucket_id}/{remote_path} "
-          "(retained after run; storage charges may apply until manually deleted)", file=sys.stderr)
-    return replace(spec, bootstrap=("python3", "/tmp/hfdask-source/bootstrap.py", json.dumps(extras),
-                                    hashlib.sha256(payload).hexdigest()),
-                   volumes=[*spec.volumes, Volume(type="bucket", source=bucket_id, path=folder,
-                            mount_path="/tmp/hfdask-source", read_only=True)])
+    api.batch_bucket_files(
+        bucket_id,
+        add=[
+            (payload, remote_path),
+            (bootstrap, f"{folder}/bootstrap.py"),
+        ],
+    )
+    print(
+        f"Source artifact: hf://buckets/{bucket_id}/{remote_path} "
+        "(retained after run; storage charges may apply until manually deleted)",
+        file=sys.stderr,
+    )
+    return replace(
+        spec,
+        bootstrap=(
+            "python3",
+            "/tmp/hfdask-source/bootstrap.py",
+            json.dumps(extras),
+            hashlib.sha256(payload).hexdigest(),
+        ),
+        volumes=[
+            *spec.volumes,
+            Volume(
+                type="bucket",
+                source=bucket_id,
+                path=folder,
+                mount_path="/tmp/hfdask-source",
+                read_only=True,
+            ),
+        ],
+    )
 
 
 def load_cluster(
-    path: Path, root: Path, script: str,
+    path: Path,
+    root: Path,
+    script: str,
 ) -> tuple[JobSpec, dict[str, Any], float, list[str]]:
     # Load lazily so non-CLI library users do not need PyYAML at import time.
     yaml = import_module("yaml")
@@ -165,25 +218,39 @@ def load_cluster(
         location = MOUNT_SOURCE.fullmatch(mount.source)
         assert location is not None  # Validated by MountConfig; conversion only below.
         kind, namespace, name, subfolder = location.groups()
-        volumes.append(Volume(type=kind[:-1], source=f"{namespace}/{name}",
-                              revision=mount.revision, path=subfolder or "",
-                              mount_path=mount.target, read_only=mount.read_only))
+        volumes.append(
+            Volume(
+                type=kind[:-1],
+                source=f"{namespace}/{name}",
+                revision=mount.revision,
+                path=subfolder or "",
+                mount_path=mount.target,
+                read_only=mount.read_only,
+            )
+        )
     spec = JobSpec(
         namespace=config.namespace,
         image=config.environment.image,
-        entrypoint="hfdask.runner:run_script", kwargs={"script": script},
+        entrypoint="hfdask.runner:run_script",
+        kwargs={"script": script},
         # YAML counts remote workers; JobSpec includes the colocated worker.
         workers=config.workers.count + int(scheduler_worker),
         flavor=config.workers.flavor,
-        timeout=config.timeout, volumes=volumes,
-        env={"PYTHONPATH": "/tmp/hfdask-project:"
-                          + str(PurePosixPath("/tmp/hfdask-project") / PurePosixPath(script).parent),
-             "DASK_DISTRIBUTED__WORKER__DAEMON": "False",
-             "DASK_DISTRIBUTED__WORKER__MULTIPROCESSING_METHOD": "spawn",
-             "VLLM_WORKER_MULTIPROC_METHOD": "spawn"},
+        timeout=config.timeout,
+        volumes=volumes,
+        env={
+            "PYTHONPATH": "/tmp/hfdask-project:"
+            + str(PurePosixPath("/tmp/hfdask-project") / PurePosixPath(script).parent),
+            "DASK_DISTRIBUTED__WORKER__DAEMON": "False",
+            "DASK_DISTRIBUTED__WORKER__MULTIPROCESSING_METHOD": "spawn",
+            "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+        },
     )
-    options: dict[str, Any] = {"public_relays": True, "scheduler_worker": scheduler_worker,
-               "scheduler_flavor": config.coordinator.flavor}
+    options: dict[str, Any] = {
+        "public_relays": True,
+        "scheduler_worker": scheduler_worker,
+        "scheduler_flavor": config.coordinator.flavor,
+    }
     return spec, options, config.timeout_seconds, config.environment.extras
 
 
@@ -210,13 +277,17 @@ def main(argv: list[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     run = commands.add_parser("run", help="Run a project-relative Dask script on a YAML cluster")
     run.add_argument("--cluster", type=Path, required=True)
-    run.add_argument("--manifest", type=Path,
-                     help="Public recovery manifest (default: .hfdask/run-*.json)")
+    run.add_argument(
+        "--manifest", type=Path, help="Public recovery manifest (default: .hfdask/run-*.json)"
+    )
     run.add_argument("script")
     args = parser.parse_args(argv)
     cluster: Cluster | None = None
-    manifest: Path = (args.manifest if args.manifest is not None
-                      else Path(".hfdask") / f"run-{secrets.token_hex(8)}.json")
+    manifest: Path = (
+        args.manifest
+        if args.manifest is not None
+        else Path(".hfdask") / f"run-{secrets.token_hex(8)}.json"
+    )
     try:
         spec, options, timeout, extras = load_cluster(args.cluster, Path.cwd(), args.script)
         nodes = spec.workers + 1 - int(options["scheduler_worker"])
@@ -227,13 +298,14 @@ def main(argv: list[str] | None = None) -> int:
 
         manifest.parent.mkdir(parents=True, exist_ok=True)
         with manifest.open("x") as output:
-            output.write('{}\n')
+            output.write("{}\n")
         print(f"Recovery manifest: {manifest}", file=sys.stderr)
         api = HfApi()
         spec = prepare_spec(spec, Path.cwd(), args.script, extras, api)
         try:
-            cluster = submit_cluster(spec, identities, api=api, **options,
-                                     on_submitted=partial(save_manifest, manifest))
+            cluster = submit_cluster(
+                spec, identities, api=api, **options, on_submitted=partial(save_manifest, manifest)
+            )
         except LaunchError as error:
             cluster = error.cluster
             raise
@@ -249,8 +321,11 @@ def main(argv: list[str] | None = None) -> int:
                 save_manifest(manifest, cluster)
             # A manifest failure must not prevent cleanup; print recovery handles instead.
             except Exception as save_error:  # noqa: BLE001
-                print(f"Manifest write failed: {save_error}; known jobs: "
-                      f"{json.dumps(cluster.manifest())}", file=sys.stderr)
+                print(
+                    f"Manifest write failed: {save_error}; known jobs: "
+                    f"{json.dumps(cluster.manifest())}",
+                    file=sys.stderr,
+                )
             try:
                 cluster.close()
             # Report any cleanup failure without claiming that capacity was released.

@@ -216,10 +216,14 @@ of the source bundle and grant mounts only the access the workload needs.
 
 ```sh
 uv sync --group dev
-uv run pytest
-uv run ruff check .
-uv run mypy src
+mise run check-format
+mise run lint  # Ruff + ty
+mise run test
 ```
+
+Ruff lint and formatting cover `src`, `tests`, and `examples`; ty checks `src`.
+Use `mise run format` to apply Ruff formatting. CI runs the same formatting,
+lint, and test tasks on pull requests and pushes to `main`.
 
 Run the opt-in encrypted transport tests with:
 

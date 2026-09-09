@@ -29,11 +29,18 @@ def require_extraction_budget(file_count: int, total: int) -> None:
         raise SystemExit("hfdask source archive exceeds extraction limits")
 
 
-def require_safe_archive_member(member: tarfile.TarInfo,
-                                names: set[PurePosixPath]) -> PurePosixPath:
+def require_safe_archive_member(
+    member: tarfile.TarInfo, names: set[PurePosixPath]
+) -> PurePosixPath:
     path = PurePosixPath(member.name)
-    if (not member.isfile() or path.is_absolute() or ".." in path.parts
-            or not path.parts or member.size < 0 or path in names):
+    if (
+        not member.isfile()
+        or path.is_absolute()
+        or ".." in path.parts
+        or not path.parts
+        or member.size < 0
+        or path in names
+    ):
         raise SystemExit("Unsafe hfdask source archive")
     return path
 

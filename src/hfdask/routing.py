@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from typing import Any
 
+from distributed import Client, Future
 from pydantic import TypeAdapter
 
 from .config import CONFIG, PlacementConfig
@@ -18,13 +19,16 @@ def require_tag_collection(tags: Iterable[str]) -> set[str]:
     return set(_tag_collection.validate_python(tuple(tags)))
 
 
-def workers_with(client: Any, *, tags: Iterable[str]) -> list[str]:
+def workers_with(client: Client, *, tags: Iterable[str]) -> list[str]:
     """Snapshot eligible workers. Refresh after scaling; never falls back silently."""
     required = require_tag_collection(tags)
-    inventories = {address: worker.get("hfdask", {}) for address, worker
-                   in client.scheduler_info()["workers"].items()}
-    eligible = sorted(address for address, info in inventories.items()
-                      if required.issubset(info.get("tags", [])))
+    inventories = {
+        address: worker.get("hfdask", {})
+        for address, worker in client.scheduler_info()["workers"].items()
+    }
+    eligible = sorted(
+        address for address, info in inventories.items() if required.issubset(info.get("tags", []))
+    )
     return require_matching_workers(eligible, required)
 
 
@@ -34,10 +38,21 @@ def require_matching_workers(eligible: list[str], required: set[str]) -> list[st
     return eligible
 
 
-def submit_on(client: Any, function: Callable[..., Any], *args: Any,
-              tags: Iterable[str], resources: dict[str, float] | None = None,
-              **kwargs: Any) -> Any:
+def submit_on(
+    client: Client,
+    function: Callable[..., Any],
+    *args: object,
+    tags: Iterable[str],
+    resources: dict[str, float] | None = None,
+    **kwargs: object,
+) -> Future:
     """Submit with hard categorical affinity plus native numeric reservations."""
     PlacementConfig(kwargs=kwargs)
-    return client.submit(function, *args, workers=workers_with(client, tags=tags),
-                         allow_other_workers=False, resources=resources, **kwargs)
+    return client.submit(
+        function,
+        *args,
+        workers=workers_with(client, tags=tags),
+        allow_other_workers=False,
+        resources=resources,
+        **kwargs,
+    )

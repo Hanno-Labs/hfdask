@@ -9,12 +9,15 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from distributed import Worker
 
 from .config import ServiceConfig, WorkerConfig
 
 MAX_WORKERS_PER_NODE = 16
-GIB = 1024 ** 3
+GIB = 1024**3
 
 
 def _read(path: Path) -> str:
@@ -64,24 +67,34 @@ def gpu_inventory() -> list[dict[str, Any]]:
             raise RuntimeError("GPU visibility is set but nvidia-smi is unavailable")
         return []
     output = subprocess.run(
-        [executable, "--query-gpu=index,uuid,name,memory.total,mig.mode.current",
-         "--format=csv,noheader,nounits"],
-        check=True, capture_output=True, text=True, timeout=15,
+        [
+            executable,
+            "--query-gpu=index,uuid,name,memory.total,mig.mode.current",
+            "--format=csv,noheader,nounits",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
     ).stdout
     inventory: list[dict[str, Any]] = []
     for row in csv.reader(output.splitlines()):
         index, uuid, name, memory, mig = (field.strip() for field in row)
         if mig.lower() == "enabled":
             raise RuntimeError("MIG partitions are not yet supported; refusing pooled GPU capacity")
-        inventory.append({"index": index, "uuid": uuid, "name": name,
-                          "vram_bytes": int(float(memory) * 1024 ** 2)})
+        inventory.append(
+            {"index": index, "uuid": uuid, "name": name, "vram_bytes": int(float(memory) * 1024**2)}
+        )
     if visible is None:
         return inventory
     selected = []
     for token in visible.split(","):
         token = token.strip()
-        matches = [gpu for gpu in inventory if gpu["index"] == token
-                   or (token.startswith("GPU-") and gpu["uuid"].startswith(token))]
+        matches = [
+            gpu
+            for gpu in inventory
+            if gpu["index"] == token or (token.startswith("GPU-") and gpu["uuid"].startswith(token))
+        ]
         if len(matches) != 1 or matches[0] in selected:
             raise RuntimeError("Unsupported or ambiguous CUDA visibility (including MIG)")
         selected.append(matches[0])
@@ -89,8 +102,9 @@ def gpu_inventory() -> list[dict[str, Any]]:
 
 
 def detect() -> dict[str, Any]:
-    cpu_count = float(len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity")
-                      else (os.cpu_count() or 1))
+    cpu_count = float(
+        len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+    )
     ram = int(os.sysconf("SC_PAGE_SIZE")) * int(os.sysconf("SC_PHYS_PAGES"))
     cpu_limits, ram_limits = _limits(Path("/sys/fs/cgroup"))
     cpus = min([cpu_count, *cpu_limits])
@@ -105,8 +119,9 @@ def require_supported_gpu_count(gpus: list[dict[str, Any]]) -> None:
         raise ValueError("At most 16 GPU workers per Job are supported")
 
 
-def worker_profiles(inventory: dict[str, Any], flavor: str, threads: int,
-                    memory_limit: str = "auto") -> list[dict[str, Any]]:
+def worker_profiles(
+    inventory: dict[str, Any], flavor: str, threads: int, memory_limit: str = "auto"
+) -> list[dict[str, Any]]:
     from dask.utils import parse_bytes
 
     WorkerConfig(threads=threads, memory_limit=memory_limit)
@@ -121,32 +136,44 @@ def worker_profiles(inventory: dict[str, Any], flavor: str, threads: int,
     profiles = []
     for index in range(count):
         gpu = gpus[index] if gpus else None
-        resources = {"CPU_THREADS": cpu, "RAM_GIB": ram / GIB,
-                     "GPU": float(gpu is not None),
-                     "GPU_VRAM_GIB": gpu["vram_bytes"] * 0.9 / GIB if gpu else 0.0}
+        resources = {
+            "CPU_THREADS": cpu,
+            "RAM_GIB": ram / GIB,
+            "GPU": float(gpu is not None),
+            "GPU_VRAM_GIB": gpu["vram_bytes"] * 0.9 / GIB if gpu else 0.0,
+        }
         tags = [f"FLAVOR_{flavor}"]
         if gpu:
             normalized = re.sub(r"[^A-Z0-9]+", "_", gpu["name"].upper()).strip("_")
-            family = re.search(r"\b(A100|H100|H200|B100|B200|V100|T4|L4|L40S?|A10)\b",
-                               gpu["name"].upper())
+            family = re.search(
+                r"\b(A100|H100|H200|B100|B200|V100|T4|L4|L40S?|A10)\b", gpu["name"].upper()
+            )
             model = family.group(1) if family else normalized.removeprefix("NVIDIA_")
             tags += ["HAS_GPU", "GPU_VENDOR_NVIDIA", f"GPU_MODEL_{model}"]
-        profiles.append({"resources": resources, "tags": tags, "flavor": flavor,
-                         "gpu": gpu, "node_inventory": inventory,
-                         "memory_limit": ram, "nthreads": max(1, math.ceil(cpu))})
+        profiles.append(
+            {
+                "resources": resources,
+                "tags": tags,
+                "flavor": flavor,
+                "gpu": gpu,
+                "node_inventory": inventory,
+                "memory_limit": ram,
+                "nthreads": max(1, math.ceil(cpu)),
+            }
+        )
     return profiles
 
 
 def service_owners(nodes: int) -> list[int]:
     # Preserve primary remote worker ports, with reserved slots for additional GPUs.
-    return list(range(nodes)) + [node for node in range(nodes)
-                                for _ in range(MAX_WORKERS_PER_NODE * 2)]
+    return list(range(nodes)) + [
+        node for node in range(nodes) for _ in range(MAX_WORKERS_PER_NODE * 2)
+    ]
 
 
 def worker_service(nodes: int, node: int, ordinal: int) -> int:
     ServiceConfig(nodes=nodes, node=node, ordinal=ordinal)
-    return (node if node and ordinal == 0 else
-            nodes + node * MAX_WORKERS_PER_NODE * 2 + ordinal * 2)
+    return node if node and ordinal == 0 else nodes + node * MAX_WORKERS_PER_NODE * 2 + ordinal * 2
 
 
 def nanny_service(nodes: int, node: int, ordinal: int) -> int:
@@ -154,7 +181,7 @@ def nanny_service(nodes: int, node: int, ordinal: int) -> int:
     return nodes + node * MAX_WORKERS_PER_NODE * 2 + ordinal * 2 + 1
 
 
-def worker_metadata(worker: Any, *, profile: dict[str, Any]) -> dict[str, Any]:
+def worker_metadata(worker: Worker, *, profile: dict[str, Any]) -> dict[str, Any]:
     result = dict(profile)
     result["visible_cuda"] = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     result["nthreads"] = worker.state.nthreads

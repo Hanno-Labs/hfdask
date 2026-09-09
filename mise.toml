@@ -1,0 +1,22 @@
+[tools]
+uv = "latest"
+
+[tasks.lint]
+description = "Lint with ruff + type-check with ty"
+sources = ["src/**/*.py", "tests/**/*.py", "examples/**/*.py", "pyproject.toml", "uv.lock"]
+run = ["uv run ruff check src tests examples", "uv run ty check src"]
+
+[tasks.format]
+description = "Format code with ruff"
+sources = ["src/**/*.py", "tests/**/*.py", "examples/**/*.py"]
+run = "uv run ruff format src tests examples"
+
+[tasks.check-format]
+description = "Check formatting without writing changes"
+sources = ["src/**/*.py", "tests/**/*.py", "examples/**/*.py", "pyproject.toml"]
+run = "uv run ruff format --check src tests examples"
+
+[tasks.test]
+description = "Run the test suite"
+sources = ["src/**/*.py", "tests/**/*.py", "examples/**/*.py", "pyproject.toml", "uv.lock"]
+run = "uv run pytest tests/"

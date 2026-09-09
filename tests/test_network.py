@@ -36,6 +36,7 @@ def test_reject_before_dask_connection(monkeypatch):
         await mesh.incoming(incoming)
         opened.assert_not_called()
         connection.close.assert_any_call(1, b"not a cluster member")
+
     asyncio.run(check())
 
 
@@ -57,6 +58,7 @@ def test_bridge_half_close():
         stream.send.return_value.finish.assert_awaited_once()
         writer.write.assert_called_once_with(b"reply")
         writer.close.assert_called_once()
+
     asyncio.run(check())
 
 
@@ -68,11 +70,11 @@ def test_non_loopback_rejected():
 @pytest.mark.parametrize("service", [1, 3, 65535])
 def test_service_rejected_before_local_connection(monkeypatch, service):
     async def check():
-        mesh = Mesh(peer(b"own"), [peer(b"own"), peer(b"other")], 0,
-                    services=[0, 1, 0])
+        mesh = Mesh(peer(b"own"), [peer(b"own"), peer(b"other")], 0, services=[0, 1, 0])
         stream = MagicMock()
         stream.recv.return_value.read_exact = AsyncMock(
-            side_effect=[b"D", service.to_bytes(2, "big")])
+            side_effect=[b"D", service.to_bytes(2, "big")]
+        )
         connection = MagicMock()
         connection.remote_id.return_value.to_bytes.return_value = b"other"
         connection.accept_bi = AsyncMock(return_value=stream)
@@ -85,4 +87,5 @@ def test_service_rejected_before_local_connection(monkeypatch, service):
         with pytest.raises(PermissionError, match="Service"):
             await mesh.incoming(incoming)
         opened.assert_not_called()
+
     asyncio.run(check())

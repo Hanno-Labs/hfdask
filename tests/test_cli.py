@@ -22,7 +22,7 @@ def project(tmp_path, monkeypatch):
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nname = "demo"\nversion = "0.1.0"\n'
         'dependencies = ["hfdask==0.1.0"]\n'
-        '[project.optional-dependencies]\ninference = []\n'
+        "[project.optional-dependencies]\ninference = []\n"
     )
     (tmp_path / "uv.lock").write_text("version = 1\n")
     (tmp_path / "job.py").write_text("from distributed import Client\nclient = Client()\n")
@@ -51,8 +51,11 @@ def test_yaml_contract(project):
     assert spec.kwargs == {"script": "job.py"}
     assert spec.volumes[0].source == "example/data"
     assert spec.volumes[0].read_only is True
-    assert options == {"public_relays": True, "scheduler_worker": False,
-                       "scheduler_flavor": "cpu-basic"}
+    assert options == {
+        "public_relays": True,
+        "scheduler_worker": False,
+        "scheduler_flavor": "cpu-basic",
+    }
     assert timeout == 7200
     assert spec.env["DASK_DISTRIBUTED__WORKER__DAEMON"] == "False"
     assert spec.bootstrap[:2] == ("python3", "/tmp/hfdask-source/bootstrap.py")
@@ -60,17 +63,23 @@ def test_yaml_contract(project):
     assert json.loads(spec.bootstrap[2]) == ["inference"]
     assert len(spec.bootstrap) == 4
     assert len(spec.bootstrap[3]) == 64
-    assert spec.command()[len(spec.bootstrap):][:4] == [
-        "python", "-m", "hfdask.runner", "hfdask.runner:run_script"]
+    assert spec.command()[len(spec.bootstrap) :][:4] == [
+        "python",
+        "-m",
+        "hfdask.runner",
+        "hfdask.runner:run_script",
+    ]
 
 
 @pytest.mark.parametrize("worker", [False, True])
 @pytest.mark.parametrize("count", [1, 63])
 def test_yaml_coordinator_worker(project, worker, count):
     path = project / "inference.yaml"
-    path.write_text(path.read_text().replace(
-        "  flavor: cpu-basic", f"  flavor: cpu-basic\n  worker: {str(worker).lower()}"
-    ).replace("  count: 4", f"  count: {count}"))
+    path.write_text(
+        path.read_text()
+        .replace("  flavor: cpu-basic", f"  flavor: cpu-basic\n  worker: {str(worker).lower()}")
+        .replace("  count: 4", f"  count: {count}")
+    )
     spec, options, _, _ = cli.load_cluster(path, project, "job.py")
     assert options["scheduler_worker"] is worker
     assert spec.workers == count + int(worker)
@@ -81,9 +90,9 @@ def test_yaml_coordinator_worker(project, worker, count):
 @pytest.mark.parametrize("worker", ['"true"', '"false"', "1", "0", "null", "[]", "{}"])
 def test_coordinator_worker_requires_boolean(project, worker):
     path = project / "inference.yaml"
-    path.write_text(path.read_text().replace(
-        "  flavor: cpu-basic", f"  flavor: cpu-basic\n  worker: {worker}"
-    ))
+    path.write_text(
+        path.read_text().replace("  flavor: cpu-basic", f"  flavor: cpu-basic\n  worker: {worker}")
+    )
     with pytest.raises(ValidationError, match=r"coordinator\.worker"):
         cli.load_cluster(path, project, "job.py")
 
@@ -97,14 +106,26 @@ def test_archive_selection(project):
     with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
         names = archive.getnames()
         assert {"job.py", "uv.lock", "pyproject.toml"} <= set(names)
-        assert not set(names) & {"ignored.txt", "tracked-ignored.txt", ".env", "private.pem",
-                                 "mise.local.toml"}
+        assert not set(names) & {
+            "ignored.txt",
+            "tracked-ignored.txt",
+            ".env",
+            "private.pem",
+            "mise.local.toml",
+        }
 
 
-@pytest.mark.parametrize("name", [
-    "node-0.env", "config/node-worker.env", "secrets/node-key",
-    ".secrets/node-key", "config/secrets/node-key", "config/.secrets/node-key",
-])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "node-0.env",
+        "config/node-worker.env",
+        "secrets/node-key",
+        ".secrets/node-key",
+        "config/secrets/node-key",
+        "config/.secrets/node-key",
+    ],
+)
 @pytest.mark.parametrize("tracked", [False, True])
 def test_archive_excludes_node_keys_and_secret_directories(project, name, tracked):
     path = project / name
@@ -133,8 +154,9 @@ def test_nested_script(project, script):
     spec, _, _, extras = cli.load_cluster(project / "inference.yaml", project, script)
     assert spec.kwargs == {"script": script}
     assert spec.env["PYTHONPATH"] == "/tmp/hfdask-project:/tmp/hfdask-project/examples"
-    with tarfile.open(fileobj=io.BytesIO(cli.package_project(project, script, extras)),
-                      mode="r:gz") as archive:
+    with tarfile.open(
+        fileobj=io.BytesIO(cli.package_project(project, script, extras)), mode="r:gz"
+    ) as archive:
         assert "examples/job.py" in archive.getnames()
 
 
@@ -187,8 +209,9 @@ def test_mount_read_only_requires_boolean(project):
 @pytest.mark.parametrize("revision", [None, "main", "release/v1", "a" * 40])
 def test_repository_mounts(project, kind, revision):
     path = project / "inference.yaml"
-    config = path.read_text().replace("hf://buckets/example/data",
-                                      f"hf://{kind}/example/repo/input/nested")
+    config = path.read_text().replace(
+        "hf://buckets/example/data", f"hf://{kind}/example/repo/input/nested"
+    )
     config = config.replace("    read_only: true\n", "")
     if revision is not None:
         config += f"    revision: {revision}\n"
@@ -206,8 +229,11 @@ def test_repository_mounts(project, kind, revision):
 @pytest.mark.parametrize("kind", ["models", "datasets", "spaces"])
 def test_repositories_reject_writable_mounts(project, kind):
     path = project / "inference.yaml"
-    path.write_text(path.read_text().replace("hf://buckets/", f"hf://{kind}/")
-                    .replace("read_only: true", "read_only: false"))
+    path.write_text(
+        path.read_text()
+        .replace("hf://buckets/", f"hf://{kind}/")
+        .replace("read_only: true", "read_only: false")
+    )
     with pytest.raises(ValueError, match="must be read-only"):
         cli.load_cluster(path, project, "job.py")
 
@@ -215,8 +241,9 @@ def test_repositories_reject_writable_mounts(project, kind):
 @pytest.mark.parametrize("revision", ['""', "null", "123", "true"])
 def test_repository_revision_must_be_nonempty_text(project, revision):
     path = project / "inference.yaml"
-    path.write_text(path.read_text().replace("hf://buckets/", "hf://models/")
-                    + f"    revision: {revision}\n")
+    path.write_text(
+        path.read_text().replace("hf://buckets/", "hf://models/") + f"    revision: {revision}\n"
+    )
     with pytest.raises(ValidationError, match=r"mounts\.0(?:\.revision)?"):
         cli.load_cluster(path, project, "job.py")
 
@@ -228,8 +255,9 @@ def test_bucket_revision_is_rejected(project):
         cli.load_cluster(path, project, "job.py")
 
 
-@pytest.mark.parametrize("source", ["hf://unknown/org/repo", "hf://models/org",
-                                   "hf://datasets/org/repo/../data"])
+@pytest.mark.parametrize(
+    "source", ["hf://unknown/org/repo", "hf://models/org", "hf://datasets/org/repo/../data"]
+)
 def test_invalid_mount_source(project, source):
     path = project / "inference.yaml"
     path.write_text(path.read_text().replace("hf://buckets/example/data", source))
@@ -242,9 +270,17 @@ def test_example_pins_input_mounts():
     spec, _, _, _ = cli.load_cluster(root / "examples/inference.yaml", root, "examples/job.py")
     model, dataset, output = spec.volumes
     assert (model.type, model.source, model.mount_path, model.revision) == (
-        "model", "Qwen/Qwen3-0.6B", "/model", "c1899de289a04d12100db370d81485cdf75e47ca")
+        "model",
+        "Qwen/Qwen3-0.6B",
+        "/model",
+        "c1899de289a04d12100db370d81485cdf75e47ca",
+    )
     assert (dataset.type, dataset.source, dataset.mount_path, dataset.revision) == (
-        "dataset", "fancyzhx/ag_news", "/dataset", "eb185aade064a813bc0b7f42de02595523103ca4")
+        "dataset",
+        "fancyzhx/ag_news",
+        "/dataset",
+        "eb185aade064a813bc0b7f42de02595523103ca4",
+    )
     assert model.read_only and dataset.read_only
     assert output.type == "bucket" and output.read_only is False
 
@@ -267,8 +303,20 @@ def test_bootstrap_forwards_appended_mesh_arguments(project, monkeypatch, capsys
     mounted.write_bytes(payload)
     assert len(payload) > 32 * 1024
     assert sum(len(arg) + 1 for arg in command) < 8192
-    monkeypatch.setattr("sys.argv", [*command[1:], "python", "-m", "hfdask.runner",
-                                   "hfdask.runner:run_script", "--mesh", "{}", "--node", "2"])
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            *command[1:],
+            "python",
+            "-m",
+            "hfdask.runner",
+            "hfdask.runner:run_script",
+            "--mesh",
+            "{}",
+            "--node",
+            "2",
+        ],
+    )
     import os
     import shutil
 
@@ -282,15 +330,28 @@ def test_bootstrap_forwards_appended_mesh_arguments(project, monkeypatch, capsys
     monkeypatch.setattr(bootstrap, "ROOT", destination)
     bootstrap.main()
     sync.assert_called_once_with(
-        ["/usr/bin/uv", "sync", "--locked", "--no-dev", "--extra", "inference"], check=True)
+        ["/usr/bin/uv", "sync", "--locked", "--no-dev", "--extra", "inference"], check=True
+    )
     assert execute.call_args.args[1] == [
-        "/usr/bin/uv", "run", "--no-sync", "python", "-m", "hfdask.runner",
-        "hfdask.runner:run_script", "--mesh", "{}", "--node", "2"]
+        "/usr/bin/uv",
+        "run",
+        "--no-sync",
+        "python",
+        "-m",
+        "hfdask.runner",
+        "hfdask.runner:run_script",
+        "--mesh",
+        "{}",
+        "--node",
+        "2",
+    ]
     assert (destination / "job.py").read_text() == (project / "job.py").read_text()
     assert (destination / "large.lock").read_bytes() == (project / "large.lock").read_bytes()
     assert capsys.readouterr().out.splitlines() == [
-        "hfdask: staging project source", "hfdask: syncing locked environment",
-        "hfdask: starting runner"]
+        "hfdask: staging project source",
+        "hfdask: syncing locked environment",
+        "hfdask: starting runner",
+    ]
 
 
 @pytest.mark.parametrize("failure", [None, "wait", "launch", "interrupt"])
@@ -313,8 +374,9 @@ def test_lifecycle(project, monkeypatch, failure):
         cluster.wait.side_effect = TimeoutError("still running")
     elif failure == "interrupt":
         cluster.wait.side_effect = KeyboardInterrupt()
-    result = cli.main(["run", "--cluster", "inference.yaml",
-                       "--manifest", "manifest.json", "job.py"])
+    result = cli.main(
+        ["run", "--cluster", "inference.yaml", "--manifest", "manifest.json", "job.py"]
+    )
     assert result == (130 if failure == "interrupt" else 1 if failure else 0)
     assert captured["options"]["api"] is cli.HfApi()
     assert "extras" not in captured["options"]
@@ -342,8 +404,10 @@ def test_cli_coordinator_worker_submission(project, monkeypatch, worker):
     api = cli.HfApi()
     api.run_job.return_value.id = "job1"
 
-    assert cli.main(["run", "--cluster", "inference.yaml",
-                     "--manifest", "manifest.json", "job.py"]) == 0
+    assert (
+        cli.main(["run", "--cluster", "inference.yaml", "--manifest", "manifest.json", "job.py"])
+        == 0
+    )
     assert api.run_job.call_count == 2
     calls = [call.kwargs for call in api.run_job.call_args_list]
     assert [call["flavor"] for call in calls] == ["cpu-basic", "h200"]
@@ -361,14 +425,19 @@ def test_cli_coordinator_worker_submission(project, monkeypatch, worker):
 def test_submission_propagates_environment_and_wrapper(monkeypatch):
     api = MagicMock()
     api.run_job.return_value.id = "job1"
-    spec = JobSpec(namespace="example", image="stock", entrypoint="hfdask.runner:run_script",
-                   workers=1, bootstrap=("wrapper",), env={"SETTING": "value"})
+    spec = JobSpec(
+        namespace="example",
+        image="stock",
+        entrypoint="hfdask.runner:run_script",
+        workers=1,
+        bootstrap=("wrapper",),
+        env={"SETTING": "value"},
+    )
     submit(spec, api=api)
     assert api.run_job.call_args.kwargs["env"] == spec.env
     assert api.run_job.call_args.kwargs["command"][0] == "wrapper"
     monkeypatch.setattr(Identity, "public_id", lambda self: self.secret.hex())
-    submit_cluster(spec, [Identity(b"a" * 32), Identity(b"b" * 32)], api=api,
-                   public_relays=True)
+    submit_cluster(spec, [Identity(b"a" * 32), Identity(b"b" * 32)], api=api, public_relays=True)
     args = api.run_job.call_args.kwargs
     assert args["env"] == spec.env
     assert args["command"][0] == "wrapper"
@@ -384,19 +453,24 @@ def test_interrupt_submission_retains_known_jobs(monkeypatch):
         raise KeyboardInterrupt()
 
     with pytest.raises(LaunchError) as raised:
-        submit_cluster(JobSpec(namespace="example", image="stock",
-                               entrypoint="module:run", workers=1),
-                       [Identity(b"a" * 32), Identity(b"b" * 32)], api=api,
-                       public_relays=True, on_submitted=interrupt)
+        submit_cluster(
+            JobSpec(namespace="example", image="stock", entrypoint="module:run", workers=1),
+            [Identity(b"a" * 32), Identity(b"b" * 32)],
+            api=api,
+            public_relays=True,
+            on_submitted=interrupt,
+        )
     assert isinstance(raised.value.__cause__, KeyboardInterrupt)
     assert raised.value.cluster.jobs[0].id == "known"
 
 
 def test_own_project_needs_no_transport_extra(project):
     path = project / "pyproject.toml"
-    path.write_text(path.read_text().replace('name = "demo"', 'name = "hfdask"')
-                    .replace('dependencies = ["hfdask==0.1.0"]',
-                             'dependencies = ["iroh==1.1.0"]'))
+    path.write_text(
+        path.read_text()
+        .replace('name = "demo"', 'name = "hfdask"')
+        .replace('dependencies = ["hfdask==0.1.0"]', 'dependencies = ["iroh==1.1.0"]')
+    )
     assert isinstance(cli.package_project(project, "job.py", ["inference"]), bytes)
 
 
@@ -425,8 +499,9 @@ def test_bootstrap_rejects_traversal(project, monkeypatch):
         archive.addfile(entry, io.BytesIO(b"x"))
     mounted = project / "project.tar.gz"
     mounted.write_bytes(payload.getvalue())
-    monkeypatch.setattr("sys.argv", ["bootstrap.py", "[]",
-                                   hashlib.sha256(payload.getvalue()).hexdigest()])
+    monkeypatch.setattr(
+        "sys.argv", ["bootstrap.py", "[]", hashlib.sha256(payload.getvalue()).hexdigest()]
+    )
     monkeypatch.setattr(bootstrap, "SOURCE", mounted)
     monkeypatch.setattr(bootstrap, "ROOT", project / "extracted")
     with pytest.raises(SystemExit, match="Unsafe"):
@@ -485,7 +560,10 @@ def test_staging_uses_private_bucket_multipart_and_unique_prefix(project, capsys
     api.create_bucket.assert_called_once_with("example/jobs-artifacts", private=True, exist_ok=True)
     api.bucket_info.assert_called_once_with("example/jobs-artifacts")
     assert [call[0] for call in api.method_calls] == [
-        "create_bucket", "bucket_info", "batch_bucket_files"]
+        "create_bucket",
+        "bucket_info",
+        "batch_bucket_files",
+    ]
     (payload, remote_path), (bootstrap_bytes, bootstrap_path) = (
         api.batch_bucket_files.call_args.kwargs["add"]
     )
@@ -500,7 +578,9 @@ def test_staging_uses_private_bucket_multipart_and_unique_prefix(project, capsys
     assert volume.mount_path == "/tmp/hfdask-source"
     assert volume.read_only is True
     assert staged.bootstrap == (
-        "python3", "/tmp/hfdask-source/bootstrap.py", json.dumps(extras),
+        "python3",
+        "/tmp/hfdask-source/bootstrap.py",
+        json.dumps(extras),
         hashlib.sha256(payload).hexdigest(),
     )
     assert staged.env == spec.env
@@ -545,8 +625,9 @@ def test_mount_prefix_is_separate_from_bucket(project):
     assert spec.volumes[0].path == "input/nested"
 
 
-@pytest.mark.parametrize("target", ["/tmp", "/tmp/hfdask-source", "/tmp/hfdask-source/nested",
-                                   "/tmp/hfdask-project"])
+@pytest.mark.parametrize(
+    "target", ["/tmp", "/tmp/hfdask-source", "/tmp/hfdask-source/nested", "/tmp/hfdask-project"]
+)
 def test_mount_cannot_overlap_bootstrap_paths(project, target):
     path = project / "inference.yaml"
     path.write_text(path.read_text().replace("target: /data", f"target: {target}"))

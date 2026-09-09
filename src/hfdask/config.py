@@ -84,8 +84,9 @@ def require_persistent_cluster(value: bool) -> bool:
 
 def require_public_relay_consent(value: bool) -> bool:
     if not value:
-        raise ValueError("Explicitly set network.public_relays: true "
-                         "to permit public discovery/relays")
+        raise ValueError(
+            "Explicitly set network.public_relays: true to permit public discovery/relays"
+        )
     return value
 
 
@@ -95,8 +96,9 @@ DaskMemoryLimit = Annotated[str, AfterValidator(require_dask_memory_limit)]
 LoopbackAddress = Annotated[str, AfterValidator(require_loopback)]
 RelativeScript = Annotated[str, AfterValidator(require_relative_script)]
 PlacementKwargs = Annotated[dict[str, Any], AfterValidator(require_owned_placement)]
-DistinctPeerIds = Annotated[tuple[bytes, ...], Field(min_length=1),
-                            AfterValidator(require_distinct_identities)]
+DistinctPeerIds = Annotated[
+    tuple[bytes, ...], Field(min_length=1), AfterValidator(require_distinct_identities)
+]
 PublicRelayConsent = Annotated[bool, AfterValidator(require_public_relay_consent)]
 PersistentMode = Annotated[bool, AfterValidator(require_persistent_cluster)]
 DistinctPublicIds = Annotated[list[Text], AfterValidator(require_distinct_public_identities)]
@@ -135,8 +137,9 @@ class PackageConfig(ConfigModel):
 class ProjectConfig(ConfigModel):
     name: str = ""
     dependencies: list[str] = Field(default_factory=list)
-    optional_dependencies: dict[str, list[str]] = Field(default_factory=dict,
-                                                       alias="optional-dependencies")
+    optional_dependencies: dict[str, list[str]] = Field(
+        default_factory=dict, alias="optional-dependencies"
+    )
     model_config = ConfigDict(extra="ignore")
 
 
@@ -158,8 +161,10 @@ class PackagePlan(PackageConfig):
         if self.project.name.lower().replace("_", "-") != "hfdask" and not any(
             re.match(r"(?i)^hfdask\s*(?:\[|[<>=!~@;]|$)", dep) for dep in dependencies
         ):
-            raise ValueError("Add hfdask to project dependencies (uv add hfdask) "
-                             "and regenerate uv.lock; the runner must use the same locked environment")
+            raise ValueError(
+                "Add hfdask to project dependencies (uv add hfdask) "
+                "and regenerate uv.lock; the runner must use the same locked environment"
+            )
         return self
 
 
@@ -215,7 +220,6 @@ class ConnectionConfig(RelayConfig):
     peers: DistinctPublicIds
     scheduler_worker: bool
 
-
     @model_validator(mode="after")
     def require_client_roster(self) -> Self:
         if len(self.peers) != self.job_nodes + 1:
@@ -237,7 +241,8 @@ class RunnerMeshConfig(RelayConfig):
     persistent: bool = False
     scheduler_worker: bool = False
     schema_version: Annotated[int, Field(strict=True, ge=1, le=1)] | None = Field(
-        default=None, alias="schema")
+        default=None, alias="schema"
+    )
 
     @property
     def nodes(self) -> int:
@@ -343,8 +348,9 @@ MOUNT_SOURCE = re.compile(r"hf://(buckets|models|datasets|spaces)/([^/]+)/([^/]+
 def require_mount_source(value: str) -> str:
     location = MOUNT_SOURCE.fullmatch(value)
     if location is None:
-        raise ValueError("mount.source must be hf://{buckets,models,datasets,spaces}/"
-                         "namespace/name[/prefix]")
+        raise ValueError(
+            "mount.source must be hf://{buckets,models,datasets,spaces}/namespace/name[/prefix]"
+        )
     subfolder = location[4] or ""
     if ".." in PurePosixPath(subfolder).parts or subfolder.startswith("/"):
         raise ValueError("mount.source prefix must be relative without '..'")
@@ -399,5 +405,6 @@ class ClusterConfig(ConfigModel):
 
     @property
     def timeout_seconds(self) -> float:
-        return float(int(self.timeout[:-1]) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[
-            self.timeout[-1]])
+        return float(
+            int(self.timeout[:-1]) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[self.timeout[-1]]
+        )

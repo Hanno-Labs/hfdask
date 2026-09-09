@@ -51,6 +51,7 @@ class Identity:
 
     def public_id(self) -> str:
         import iroh
+
         return iroh.SecretKey.from_bytes(self.secret).public().to_bytes().hex()
 
 
@@ -96,16 +97,20 @@ class LaunchPlan(LaunchConfig):
 
     @property
     def node_count(self) -> int:
-        return 1 + (sum(group.count for group in self.worker_groups)
-                    if self.worker_groups is not None
-                    else self.spec.workers - int(self.scheduler_worker))
+        return 1 + (
+            sum(group.count for group in self.worker_groups)
+            if self.worker_groups is not None
+            else self.spec.workers - int(self.scheduler_worker)
+        )
 
     @property
     def node_flavors(self) -> list[str]:
-        remote = ([group.flavor for group in self.worker_groups for _ in range(group.count)]
-                  if self.worker_groups is not None else
-                  [self.worker_flavor or self.spec.flavor]
-                  * (self.spec.workers - int(self.scheduler_worker)))
+        remote = (
+            [group.flavor for group in self.worker_groups for _ in range(group.count)]
+            if self.worker_groups is not None
+            else [self.worker_flavor or self.spec.flavor]
+            * (self.spec.workers - int(self.scheduler_worker))
+        )
         return [self.scheduler_flavor or self.spec.flavor, *remote]
 
     @property
@@ -115,21 +120,36 @@ class LaunchPlan(LaunchConfig):
 
     @property
     def connection(self) -> dict[str, Any]:
-        tags = ([list(group.tags) for group in self.worker_groups for _ in range(group.count)]
-                if self.worker_groups is not None else [[] for _ in self.node_flavors[1:]])
-        config = {"peers": self.peers, "relays": self.relays,
-                  "public_relays": self.public_relays, "startup_timeout": self.startup_timeout,
-                  "node_flavors": self.node_flavors, "node_tags": [[], *tags],
-                  "hardware_detection": True}
+        tags = (
+            [list(group.tags) for group in self.worker_groups for _ in range(group.count)]
+            if self.worker_groups is not None
+            else [[] for _ in self.node_flavors[1:]]
+        )
+        config = {
+            "peers": self.peers,
+            "relays": self.relays,
+            "public_relays": self.public_relays,
+            "startup_timeout": self.startup_timeout,
+            "node_flavors": self.node_flavors,
+            "node_tags": [[], *tags],
+            "hardware_detection": True,
+        }
         if self.client_identity is not None:
-            config.update(schema=1, persistent=True, job_nodes=len(self.node_flavors),
-                          scheduler_worker=self.scheduler_worker)
+            config.update(
+                schema=1,
+                persistent=True,
+                job_nodes=len(self.node_flavors),
+                scheduler_worker=self.scheduler_worker,
+            )
         return config
 
     @property
     def command(self) -> list[str]:
-        spec = (replace(self.spec, entrypoint="hfdask.runner:main")
-                if self.client_identity is not None else self.spec)
+        spec = (
+            replace(self.spec, entrypoint="hfdask.runner:main")
+            if self.client_identity is not None
+            else self.spec
+        )
         return spec.command()
 
 
@@ -142,8 +162,10 @@ class Cluster:
     connection: dict[str, Any] | None = None
 
     def manifest(self) -> dict[str, Any]:
-        result: dict[str, Any] = {"cluster_id": self.id, "jobs": [
-            {"namespace": job.namespace, "id": job.id} for job in self.jobs]}
+        result: dict[str, Any] = {
+            "cluster_id": self.id,
+            "jobs": [{"namespace": job.namespace, "id": job.id} for job in self.jobs],
+        }
         if self.connection is not None:
             result["connection"] = self.connection
         return result
@@ -152,9 +174,11 @@ class Cluster:
     def from_manifest(cls, manifest: dict[str, Any], *, api: HfApi | None = None) -> Cluster:
         """Restore handles for later explicit shutdown; does not submit new Jobs."""
         client = api if api is not None else HfApi()
-        return cls(manifest["cluster_id"],
-                   [Job(job["id"], job["namespace"], client) for job in manifest["jobs"]],
-                   manifest.get("connection"))
+        return cls(
+            manifest["cluster_id"],
+            [Job(job["id"], job["namespace"], client) for job in manifest["jobs"]],
+            manifest.get("connection"),
+        )
 
     def cancel(self) -> list[str]:
         """Attempt every cancellation; return IDs whose cancellation was not acknowledged.
@@ -214,8 +238,10 @@ class Cluster:
 class LaunchError(RuntimeError):
     def __init__(self, cluster: Cluster) -> None:
         self.cluster = cluster
-        super().__init__(f"Cluster {cluster.id} submission failed. Known jobs retained; "
-                         "inspect cluster labels for an ambiguous submission before retrying.")
+        super().__init__(
+            f"Cluster {cluster.id} submission failed. Known jobs retained; "
+            "inspect cluster labels for an ambiguous submission before retrying."
+        )
 
 
 def submit_cluster(
@@ -241,11 +267,18 @@ def submit_cluster(
     Hardware overrides default independently to spec.flavor. A colocated worker
     shares the scheduler Job's hardware; worker_flavor applies to remote Jobs.
     """
-    plan = LaunchPlan(spec=spec, identities=tuple(identities), client_identity=_client_identity,
-                      scheduler_flavor=scheduler_flavor, worker_flavor=worker_flavor,
-                      worker_groups=None if worker_groups is None else tuple(worker_groups),
-                      public_relays=public_relays, relays=list(relay_urls),
-                      startup_timeout=startup_timeout, scheduler_worker=scheduler_worker)
+    plan = LaunchPlan(
+        spec=spec,
+        identities=tuple(identities),
+        client_identity=_client_identity,
+        scheduler_flavor=scheduler_flavor,
+        worker_flavor=worker_flavor,
+        worker_groups=None if worker_groups is None else tuple(worker_groups),
+        public_relays=public_relays,
+        relays=list(relay_urls),
+        startup_timeout=startup_timeout,
+        scheduler_worker=scheduler_worker,
+    )
     client = api if api is not None else HfApi()
     cluster = Cluster(uuid4().hex, [])
     config = plan.connection
@@ -258,10 +291,12 @@ def submit_cluster(
         for index, identity in enumerate(plan.identities):
             info = client.run_job(
                 image=spec.image,
-                command=command + ["--mesh", configuration, "--node", str(index)]
+                command=command
+                + ["--mesh", configuration, "--node", str(index)]
                 + (["--scheduler-worker"] if scheduler_worker else []),
                 flavor=plan.node_flavors[index],
-                namespace=spec.namespace, timeout=spec.timeout,
+                namespace=spec.namespace,
+                timeout=spec.timeout,
                 volumes=spec.volumes,
                 **environment_kwargs,
                 secrets={"HFDASK_NODE_KEY": identity.secret.hex()},
@@ -275,9 +310,34 @@ def submit_cluster(
     return cluster
 
 
-def boot_cluster(spec: JobSpec, identities: Sequence[Identity], *,
-                 client_identity: Identity, **options: Any) -> Cluster:
+def boot_cluster(
+    spec: JobSpec,
+    identities: Sequence[Identity],
+    *,
+    client_identity: Identity,
+    public_relays: bool = False,
+    relay_urls: Sequence[str] = (),
+    startup_timeout: int = 1200,
+    scheduler_worker: bool = False,
+    scheduler_flavor: str | None = None,
+    worker_flavor: str | None = None,
+    worker_groups: Sequence[WorkerGroup] | None = None,
+    api: HfApi | None = None,
+    on_submitted: Callable[[Cluster], None] | None = None,
+) -> Cluster:
     """Submit a persistent cluster; connect waits for readiness, close releases Jobs."""
     PersistentWorkloadConfig(entrypoint=spec.entrypoint, kwargs=spec.kwargs)
-    return submit_cluster(spec, identities,
-                          _client_identity=client_identity, **options)
+    return submit_cluster(
+        spec,
+        identities,
+        _client_identity=client_identity,
+        public_relays=public_relays,
+        relay_urls=relay_urls,
+        startup_timeout=startup_timeout,
+        scheduler_worker=scheduler_worker,
+        scheduler_flavor=scheduler_flavor,
+        worker_flavor=worker_flavor,
+        worker_groups=worker_groups,
+        api=api,
+        on_submitted=on_submitted,
+    )

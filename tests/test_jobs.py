@@ -10,12 +10,14 @@ from hfdask import Job, JobFailed, JobSpec, submit
 
 
 def spec(**kwargs):
-    return JobSpec(namespace="example", image="registry/image:tag",
-                   entrypoint="workload:run", **kwargs)
+    return JobSpec(
+        namespace="example", image="registry/image:tag", entrypoint="workload:run", **kwargs
+    )
 
 
-@pytest.mark.parametrize("kwargs", [{"workers": 0}, {"threads_per_worker": 0},
-                                  {"kwargs": {"bad": float("nan")}}])
+@pytest.mark.parametrize(
+    "kwargs", [{"workers": 0}, {"threads_per_worker": 0}, {"kwargs": {"bad": float("nan")}}]
+)
 def test_invalid_spec(kwargs):
     with pytest.raises(ValueError):
         spec(**kwargs)
@@ -48,8 +50,9 @@ def test_failed(stage):
 
 def test_success_transition(monkeypatch):
     api = MagicMock(spec=HfApi)
-    api.inspect_job.side_effect = [SimpleNamespace(status=SimpleNamespace(stage=s))
-                                   for s in ["RUNNING", "COMPLETED"]]
+    api.inspect_job.side_effect = [
+        SimpleNamespace(status=SimpleNamespace(stage=s)) for s in ["RUNNING", "COMPLETED"]
+    ]
     monkeypatch.setattr("hfdask.jobs.time.sleep", lambda _: None)
     assert Job("job1", "example", api).wait() == "COMPLETED"
 

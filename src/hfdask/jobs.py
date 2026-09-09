@@ -64,18 +64,29 @@ class JobSpec:
     env: dict[str, str] = field(default_factory=dict)
 
     def command(self) -> list[str]:
-        RunConfig(entrypoint=self.entrypoint, workers=self.workers,
-                  threads_per_worker=self.threads_per_worker)
-        return [*self.bootstrap,
-            "python", "-m", "hfdask.runner", self.entrypoint,
-            "--workers", str(self.workers),
-            "--threads-per-worker", str(self.threads_per_worker),
-            "--memory-limit", self.memory_limit,
-            "--kwargs", json.dumps(self.kwargs, allow_nan=False),
+        RunConfig(
+            entrypoint=self.entrypoint,
+            workers=self.workers,
+            threads_per_worker=self.threads_per_worker,
+        )
+        return [
+            *self.bootstrap,
+            "python",
+            "-m",
+            "hfdask.runner",
+            self.entrypoint,
+            "--workers",
+            str(self.workers),
+            "--threads-per-worker",
+            str(self.threads_per_worker),
+            "--memory-limit",
+            self.memory_limit,
+            "--kwargs",
+            json.dumps(self.kwargs, allow_nan=False),
         ]
 
 
-class JobFailed(RuntimeError):
+class JobFailed(RuntimeError):  # noqa: N818 -- Preserve the public exception name.
     """The remote job reached a non-success terminal state."""
 
 

@@ -15,23 +15,36 @@ from .config import ConnectConfig, ConnectionConfig
 _connection_lock = threading.Lock()
 
 
-async def _serve(config: ConnectionConfig, identity: Identity,
-                 ready: concurrent.futures.Future[None], stop: threading.Event,
-                 timeout: float) -> None:
+async def _serve(
+    config: ConnectionConfig,
+    identity: Identity,
+    ready: concurrent.futures.Future[None],
+    stop: threading.Event,
+    timeout: float,
+) -> None:
     import iroh
 
     from .hardware import service_owners
     from .network import ALPN, Mesh
 
-    iroh.iroh_ffi.uniffi_set_event_loop(asyncio.get_running_loop())  # type: ignore[arg-type]
-    mode = (iroh.RelayMode.custom_from_urls(config.relays)
-            if config.relays else iroh.RelayMode.default_mode())
-    endpoint = await iroh.Endpoint.bind(iroh.EndpointOptions(
-        preset=iroh.preset_n0(), secret_key=identity.secret, alpns=[ALPN], relay_mode=mode))
+    # FFI annotates BaseEventLoop but uses the standard AbstractEventLoop interface.
+    iroh.iroh_ffi.uniffi_set_event_loop(asyncio.get_running_loop())  # ty: ignore[invalid-argument-type]
+    mode = (
+        iroh.RelayMode.custom_from_urls(config.relays)
+        if config.relays
+        else iroh.RelayMode.default_mode()
+    )
+    endpoint = await iroh.Endpoint.bind(
+        iroh.EndpointOptions(
+            preset=iroh.preset_n0(), secret_key=identity.secret, alpns=[ALPN], relay_mode=mode
+        )
+    )
     try:
         await asyncio.wait_for(endpoint.online(), timeout=timeout)
-        peers = [iroh.EndpointAddr(iroh.EndpointId.from_bytes(bytes.fromhex(peer)), None, [])
-                 for peer in config.peers]
+        peers = [
+            iroh.EndpointAddr(iroh.EndpointId.from_bytes(bytes.fromhex(peer)), None, [])
+            for peer in config.peers
+        ]
         nodes = config.job_nodes
         async with Mesh(endpoint, peers, nodes, services=service_owners(nodes)):
             ready.set_result(None)
@@ -42,8 +55,9 @@ async def _serve(config: ConnectionConfig, identity: Identity,
 
 
 @contextmanager
-def connect(manifest: dict[str, Any], identity: Identity, *,
-            timeout: float = 1200) -> Iterator[Any]:
+def connect(
+    manifest: dict[str, Any], identity: Identity, *, timeout: float = 1200
+) -> Iterator[Any]:
     """Yield a normal Dask Client. Disconnecting never cancels the HF Jobs.
 
     One mesh connection per host: fixed loopback ports start at 21000. Keep this
@@ -81,8 +95,7 @@ def connect(manifest: dict[str, Any], identity: Identity, *,
     try:
         thread.start()
         ready.result(timeout=timeout + 5)
-        with Client("tcp://127.0.0.1:21000", timeout=timeout,
-                    set_as_default=False) as client:  # type: ignore[no-untyped-call]
+        with Client("tcp://127.0.0.1:21000", timeout=timeout, set_as_default=False) as client:
             worker_nodes = set(range(1, nodes)) | ({0} if connection.scheduler_worker else set())
             wait_topology(client, worker_nodes, timeout)
             yield client

@@ -6,8 +6,13 @@ from hfdask.runner import run, run_script
 
 
 def test_real_multiprocess_cluster():
-    assert run("tests.workloads:calculate", workers=2, memory_limit="0",
-               kwargs={"count": 5}) == [0, 1, 4, 9, 16]
+    assert run("tests.workloads:calculate", workers=2, memory_limit="0", kwargs={"count": 5}) == [
+        0,
+        1,
+        4,
+        9,
+        16,
+    ]
 
 
 def test_cleanup_on_failure(monkeypatch):
@@ -38,9 +43,12 @@ def test_script_uses_default_distributed_client(tmp_path):
         "if __name__ == '__main__':\n"
         f"    Path({str(output)!r}).write_text(task().compute())\n"
     )
-    with LocalCluster(n_workers=1, threads_per_worker=1, processes=False,
-                      dashboard_address=None) as cluster, Client(
-                          cluster, set_as_default=False) as client:
+    with (
+        LocalCluster(
+            n_workers=1, threads_per_worker=1, processes=False, dashboard_address=None
+        ) as cluster,
+        Client(cluster, set_as_default=False) as client,
+    ):
         run_script(client, str(script))
         assert output.read_text() in client.scheduler_info()["workers"]
 
