@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hfdask"
+version = "0.1.0"
+description = "Run Dask workloads on Hugging Face Jobs"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+dependencies = ["huggingface-hub>=1.29,<2", "dask[distributed]>=2025.1,<2027"]
+
+[project.optional-dependencies]
+p2p = ["iroh==1.1.0"]
+
+[project.scripts]
+hfdask-runner = "hfdask.runner:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.11", "mypy>=1.15", "build>=1.2"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hfdask"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+strict = true
+
+[[tool.mypy.overrides]]
+module = ["distributed.*"]
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 100
