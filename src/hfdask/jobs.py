@@ -21,7 +21,7 @@ class JobSpec:
 
     namespace: str
     image: str
-    entrypoint: str
+    entrypoint: str = ""
     flavor: str = "cpu-basic"
     workers: int = 2
     threads_per_worker: int = 1
@@ -29,11 +29,13 @@ class JobSpec:
     timeout: str = "1h"
     kwargs: dict[str, Any] = field(default_factory=dict)
     volumes: list[Volume] = field(default_factory=list)
+    bootstrap: tuple[str, ...] = ()
+    env: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.namespace.strip() or not self.image.strip():
             raise ValueError("namespace and image are required")
-        if not _ENTRYPOINT.fullmatch(self.entrypoint):
+        if self.entrypoint and not _ENTRYPOINT.fullmatch(self.entrypoint):
             raise ValueError("entrypoint must be module:function")
         if self.workers < 1 or self.threads_per_worker < 1:
             raise ValueError("worker and thread counts must be positive")
@@ -43,7 +45,9 @@ class JobSpec:
                 raise ValueError("volume mount_path must be absolute")
 
     def command(self) -> list[str]:
-        return [
+        if not self.entrypoint:
+            raise ValueError("Batch submissions require an entrypoint")
+        return [*self.bootstrap,
             "python", "-m", "hfdask.runner", self.entrypoint,
             "--workers", str(self.workers),
             "--threads-per-worker", str(self.threads_per_worker),
@@ -93,6 +97,7 @@ class Job:
 def submit(spec: JobSpec, *, api: HfApi | None = None) -> Job:
     """Submit once. Never blindly retry a submission with an ambiguous response."""
     client = api if api is not None else HfApi()
+    environment_kwargs: dict[str, Any] = {"env": spec.env} if spec.env else {}
     info = client.run_job(
         image=spec.image,
         command=spec.command(),
@@ -100,5 +105,6 @@ def submit(spec: JobSpec, *, api: HfApi | None = None) -> Job:
         namespace=spec.namespace,
         timeout=spec.timeout,
         volumes=spec.volumes,
+        **environment_kwargs,
     )
     return Job(id=info.id, namespace=spec.namespace, api=client)

@@ -10,19 +10,28 @@ readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
-dependencies = ["huggingface-hub>=1.29,<2", "dask[distributed]>=2025.1,<2027"]
+dependencies = ["huggingface-hub>=1.29,<2", "dask[distributed]>=2025.1,<2027", "PyYAML>=6,<7"]
 
 [project.optional-dependencies]
 p2p = ["iroh==1.1.0"]
+inference = [
+    "dask[dataframe]>=2025.1,<2027",
+    "vllm>=0.10,<1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
 
 [project.scripts]
+hfdask = "hfdask.cli:main"
 hfdask-runner = "hfdask.runner:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.11", "mypy>=1.15", "build>=1.2"]
+dev = ["pytest>=8", "ruff>=0.11", "mypy>=1.15", "build>=1.2", "dask[dataframe]>=2025.1,<2027"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hfdask"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "examples", "README.md", "LICENSE", "pyproject.toml",
+           ".gitignore", "uv.lock"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

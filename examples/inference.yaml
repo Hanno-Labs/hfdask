@@ -1,0 +1,26 @@
+namespace: your-namespace
+
+coordinator:
+  flavor: cpu-basic
+
+workers:
+  flavor: h200
+  count: 4
+
+environment:
+  # Python + uv, not a vLLM server. Pin a tested image digest for production.
+  image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+  extras: [inference]
+
+mounts:
+  - source: hf://buckets/your-namespace/input
+    target: /input
+    read_only: true
+  - source: hf://buckets/your-namespace/output
+    target: /output
+    read_only: false
+
+timeout: 2h
+
+network:
+  public_relays: true

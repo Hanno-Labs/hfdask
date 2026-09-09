@@ -6,7 +6,7 @@ import json
 import math
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 from uuid import uuid4
 
@@ -53,10 +53,22 @@ class Cluster:
 
     id: str
     jobs: list[Job]
+    connection: dict[str, Any] | None = None
 
     def manifest(self) -> dict[str, Any]:
-        return {"cluster_id": self.id, "jobs": [
+        result: dict[str, Any] = {"cluster_id": self.id, "jobs": [
             {"namespace": job.namespace, "id": job.id} for job in self.jobs]}
+        if self.connection is not None:
+            result["connection"] = self.connection
+        return result
+
+    @classmethod
+    def from_manifest(cls, manifest: dict[str, Any], *, api: HfApi | None = None) -> Cluster:
+        """Restore handles for later explicit shutdown; does not submit new Jobs."""
+        client = api if api is not None else HfApi()
+        return cls(manifest["cluster_id"],
+                   [Job(job["id"], job["namespace"], client) for job in manifest["jobs"]],
+                   manifest.get("connection"))
 
     def cancel(self) -> list[str]:
         """Attempt every cancellation; return IDs whose cancellation was not acknowledged.
@@ -132,6 +144,7 @@ def submit_cluster(
     worker_groups: Sequence[WorkerGroup] | None = None,
     api: HfApi | None = None,
     on_submitted: Callable[[Cluster], None] | None = None,
+    _client_identity: Identity | None = None,
 ) -> Cluster:
     """Launch spec.workers total workers, optionally colocating one with the driver.
 
@@ -166,31 +179,50 @@ def submit_cluster(
     if len(identities) != node_count or startup_timeout < 1:
         raise ValueError("Provide one identity per Job and a positive deadline")
     ids = [identity.public_id() for identity in identities]
+    if _client_identity is not None:
+        ids.append(_client_identity.public_id())
     if len(set(ids)) != len(ids):
         raise ValueError("Every job needs a distinct identity")
     client = api if api is not None else HfApi()
     cluster = Cluster(uuid4().hex, [])
-    configuration = json.dumps({"peers": ids, "relays": list(relay_urls),
+    config = {"peers": ids, "relays": list(relay_urls),
                                 "public_relays": public_relays,
                                 "startup_timeout": startup_timeout,
                                 "node_flavors": node_flavors,
                                 "node_tags": node_tags,
-                                "hardware_detection": True})
+                                "hardware_detection": True}
+    if _client_identity is not None:
+        config.update(schema=1, persistent=True, job_nodes=node_count,
+                      scheduler_worker=scheduler_worker)
+        cluster.connection = config
+    configuration = json.dumps(config)
+    command = spec.command()
+    environment_kwargs: dict[str, Any] = {"env": spec.env} if spec.env else {}
     try:
         for index, identity in enumerate(identities):
             info = client.run_job(
                 image=spec.image,
-                command=spec.command() + ["--mesh", configuration, "--node", str(index)]
+                command=command + ["--mesh", configuration, "--node", str(index)]
                 + (["--scheduler-worker"] if scheduler_worker else []),
                 flavor=node_flavors[index],
                 namespace=spec.namespace, timeout=spec.timeout,
                 volumes=spec.volumes,
+                **environment_kwargs,
                 secrets={"HFDASK_NODE_KEY": identity.secret.hex()},
                 labels={"hfdask-cluster": cluster.id, "hfdask-node": str(index)},
             )
             cluster.jobs.append(Job(info.id, spec.namespace, client))
             if on_submitted is not None:
                 on_submitted(cluster)
-    except Exception as error:
+    except (Exception, KeyboardInterrupt) as error:
         raise LaunchError(cluster) from error
     return cluster
+
+
+def boot_cluster(spec: JobSpec, identities: Sequence[Identity], *,
+                 client_identity: Identity, **options: Any) -> Cluster:
+    """Submit a persistent cluster; connect waits for readiness, close releases Jobs."""
+    if spec.entrypoint or spec.kwargs:
+        raise ValueError("Persistent clusters do not take an entrypoint or workload kwargs")
+    return submit_cluster(replace(spec, entrypoint="hfdask.runner:main"), identities,
+                          _client_identity=client_identity, **options)

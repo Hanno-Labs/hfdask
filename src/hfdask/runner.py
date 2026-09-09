@@ -7,10 +7,13 @@ import asyncio
 import importlib
 import json
 import os
+import runpy
+import sys
 import time
 from collections.abc import Callable
 from contextlib import AsyncExitStack
 from functools import partial
+from pathlib import Path
 from typing import Any, cast
 
 from distributed import Client, LocalCluster
@@ -50,6 +53,24 @@ def run(
         result = cast(Callable[..., Any], function)(client, **(kwargs or {}))
     print(json.dumps({"phase": "workload_complete"}), flush=True)
     return result
+
+
+def run_script(client: Any, script: str) -> None:
+    """Execute ordinary Python with this cluster as Dask's default scheduler."""
+    path = Path(script).resolve(strict=True)
+    argv, search_path = sys.argv, sys.path.copy()
+    try:
+        sys.argv = [str(path)]
+        sys.path.insert(0, str(path.parent))
+        with client.as_current():
+            try:
+                runpy.run_path(str(path), run_name="__main__")
+            except SystemExit as error:
+                if error.code not in (None, 0):
+                    raise RuntimeError(f"Script exited with status {error.code}") from error
+    finally:
+        sys.argv = argv
+        sys.path[:] = search_path
 
 
 def main() -> None:
@@ -157,7 +178,7 @@ async def run_detected(args: argparse.Namespace, config: dict[str, Any], endpoin
     )
     from .network import Mesh
 
-    nodes = len(peers)
+    nodes = config.get("job_nodes", len(peers))
     worker_nodes = set(range(1, nodes)) | ({0} if args.scheduler_worker else set())
     profiles = (worker_profiles(detect(), config["node_flavors"][args.node],
                                 args.threads_per_worker, args.memory_limit)
@@ -165,7 +186,7 @@ async def run_detected(args: argparse.Namespace, config: dict[str, Any], endpoin
     async with Mesh(endpoint, peers, args.node, services=service_owners(nodes)):  # noqa: SIM117
         async with AsyncExitStack() as stack:
             if args.node == 0:
-                await stack.enter_async_context(Scheduler(
+                scheduler = await stack.enter_async_context(Scheduler(
                     host="127.0.0.1", port=21000, dashboard_address=None))
             nannies = []
             for ordinal, profile in enumerate(profiles):
@@ -189,6 +210,10 @@ async def run_detected(args: argparse.Namespace, config: dict[str, Any], endpoin
             if args.node:
                 await asyncio.gather(*(nanny.finished() for nanny in nannies))
             else:
+                if config.get("persistent"):
+                    print(json.dumps({"phase": "accepting_clients"}), flush=True)
+                    await scheduler.finished()
+                    return
                 def workload() -> None:
                     with Client("tcp://127.0.0.1:21000", set_as_default=False) as client:  # type: ignore[no-untyped-call]
                         wait_topology(client, worker_nodes, config["startup_timeout"])

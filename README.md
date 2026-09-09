@@ -1,164 +1,137 @@
 # hfdask
 
-A Python library for running Dask workloads on Hugging Face Jobs.
+Run ordinary Dask scripts on Hugging Face Jobs with a YAML cluster definition.
+Clusters support CPU and GPU workers, mounted storage, automatic hardware
+resources, and authenticated encrypted connections.
 
-Define a fixed cluster by hardware flavor and machine count, then run a Python
-function with a Dask `Client`. Clusters support CPU and GPU workers, mounted
-storage, automatic hardware resources, and authenticated encrypted connections.
+## Run a script with the CLI
 
-## Install
+Authenticate the submitting machine with `hf auth login`. From this repository's
+root, configure the namespace and bucket mounts in
+[`examples/inference.yaml`](examples/inference.yaml), stage the model and prompts
+as described in [examples](examples/README.md), then run:
 
 ```sh
-pip install -e '.[p2p]'
+uv lock
+uv run --extra p2p hfdask run --cluster examples/inference.yaml examples/job.py
 ```
 
-Install hfdask and your workload module in the container image used by the Jobs.
-Authenticate the submitting machine with `hf auth login`.
+This launches a `cpu-basic` coordinator and four `h200` worker Jobs. Submission
+reserves paid HF Jobs; verify hardware access and budget first. The coordinator
+runs the scheduler and ordinary Python script with the cluster's Dask client
+made current, so `.compute()` uses the remote workers. There is no Dask worker
+on the coordinator: only the GPUs execute Dask tasks in this example.
+No `run(client, ...)` wrapper, inline script dependencies, or custom Dockerfile
+is needed.
 
-## Write a workload
+## Dependencies and bootstrap
 
-```python
-# workload.py
-import json
-from pathlib import Path
+Dependencies come from `pyproject.toml` and `uv.lock`. PyYAML is a base dependency;
+the `inference` extra adds `dask[dataframe]` and vLLM (Linux x86_64 only). Keep the
+local command on `--extra p2p`, **not** `--extra inference`: the latter can install
+the large GPU stack locally on Linux x86_64. YAML's `environment.extras:
+[inference]` selects the remote environment; hfdask adds its own `p2p` extra there.
+Each Job runs `uv sync --locked --no-dev` with those extras before starting.
 
-def square(value):
-    return value * value
+The YAML explicitly uses the stock Python + uv image
+`ghcr.io/astral-sh/uv:python3.12-bookworm-slim`. CUDA user-space libraries come
+from the installed wheels; compatible NVIDIA drivers must come from the GPU
+host. This is offline Python inference, not a vLLM serving container. Pin a tested
+image digest for production; the four-H200 inference path has **not** been GPU-validated.
 
-def run(client, output="/output/results.json"):
-    results = client.gather(client.map(square, range(100)))
-    Path(output).write_text(json.dumps(results))
-```
+External projects must declare `hfdask[p2p]` in their dependencies (or a selected
+project extra) and regenerate `uv.lock`. Their workload dependencies and any
+YAML-selected extras must also be declared in that project.
 
-The entrypoint receives a Dask client followed by JSON-serializable keyword
-arguments from `JobSpec.kwargs`. Wait for tasks and save results before returning.
+## Cluster configuration
 
-## Create a cluster
+[`examples/inference.yaml`](examples/inference.yaml) defines the run:
 
-```python
-import json
-import iroh
-from pathlib import Path
-from huggingface_hub import Volume
-from hfdask import JobSpec, WorkerGroup
-from hfdask.cluster import Identity, submit_cluster
-
-identities = [Identity(iroh.SecretKey.generate().to_bytes()) for _ in range(3)]
-spec = JobSpec(
-    namespace="your-namespace",
-    image="your-registry/workload@sha256:...",
-    entrypoint="workload:run",
-    flavor="cpu-basic",
-    threads_per_worker=2,
-    timeout="1h",
-    volumes=[Volume(type="bucket", source="your-namespace/results",
-                    mount_path="/output", read_only=False)],
-)
-cluster = submit_cluster(
-    spec, identities,
-    scheduler_worker=True,
-    worker_groups=[WorkerGroup("cpu-performance", count=2)],
-    public_relays=True,
-    on_submitted=lambda c: Path("cluster.json").write_text(json.dumps(c.manifest())),
-)
-try:
-    cluster.wait(timeout=3600)
-finally:
-    cluster.close()
-```
-
-This starts three Jobs: a scheduler with a colocated CPU worker, plus two remote
-CPU worker machines. Supply one distinct identity per Job and keep keys secret.
-
-`WorkerGroup.count` counts remote machines. With groups, `scheduler_worker=True`
-adds a worker on the scheduler machine and `JobSpec.workers` is superseded.
-Set `scheduler_flavor` to override scheduler hardware. Without groups,
-`JobSpec.workers` sets the total worker count and `worker_flavor` selects remote
-hardware. Both overrides default to `JobSpec.flavor`.
-
-## Offline vLLM inference
-
-The [CPU coordinator + four H200 example](examples/README.md) includes a
-workload, Dockerfile, mounts, and submission code. Each H200 keeps one model
-replica loaded. Dask distributes batches and the CPU coordinator saves output.
-
-Its topology is:
-
-```python
-cluster = submit_cluster(
-    spec, five_identities,
-    scheduler_flavor="cpu-basic",
-    scheduler_worker=True,
-    worker_groups=[WorkerGroup("h200", count=4, tags=("inference",))],
-    public_relays=True,
-)
-```
-
-## Resources and routing
-
-Multi-job clusters detect hardware at startup. CPU machines run one worker;
-NVIDIA machines run one worker per visible GPU, each with its own
-`CUDA_VISIBLE_DEVICES` assignment.
-
-| Resource | Per-worker capacity |
+| Field | Purpose |
 |---|---|
-| `CPU_THREADS` | CPU quota/affinity share, capped by configured threads |
-| `RAM_GIB` | 80% of node RAM divided among workers, capped by the memory limit |
-| `GPU` | 1 for a GPU worker, 0 for a CPU worker |
-| `GPU_VRAM_GIB` | 90% of the assigned GPU's total VRAM |
+| `namespace` | HF namespace that owns the Jobs |
+| `coordinator.flavor` | Hardware for the scheduler and script |
+| `workers.flavor`, `workers.count` | Remote worker hardware and number of machines |
+| `environment.image`, `environment.extras` | Bootstrap image and locked project extras |
+| `mounts` | Storage sources, mount targets, and read-only settings |
+| `timeout` | Remote Job timeout |
+| `network.public_relays` | Explicit opt-in to public discovery and relay fallback |
 
-These are scheduling reservation budgets. Tasks request the capacity they need:
+Mount models and datasets read-only and outputs on a writable bucket. Use a
+fresh output prefix for every run, verify bucket ownership/privacy, and pin
+model/data revisions and image digests for reproducibility.
+
+Worker machines detect hardware at startup. CPU machines run one worker;
+NVIDIA machines run one worker per visible GPU, each with its own
+`CUDA_VISIBLE_DEVICES` assignment. NVIDIA detection requires `nvidia-smi`;
+MIG partitions are unsupported. Clusters support up to 64 Jobs and 16 GPU
+workers per machine.
+
+## Source shipping
+
+Run from a Git project containing `pyproject.toml`, `uv.lock`, and the
+project-relative script. The CLI ships current working-tree contents, including
+eligible untracked files, rather than just committed `HEAD`. Ignored files and
+recognized secret paths are excluded; symlinks are rejected. Review what is
+included: filename filtering cannot detect every secret. Keep data and model
+weights in mounts. Source limits are **512 KiB compressed, 8 MiB uncompressed,
+and 2,000 files**, including the lockfile.
+
+## Cleanup and recovery
+
+The CLI generates node identities and records public recovery handles in
+`.hfdask/run-*.json` (override with `--manifest PATH`, choosing an unused path).
+It waits for completion and verifies Job cleanup; failures and interrupts
+attempt to close known Jobs. If cleanup is unverified or the local process is
+lost, retain the manifest and inspect every recorded Job, including partial
+launches.
+
+With HF credentials available, use the recorded manifest to release known Jobs
+(replace the path below with the manifest printed by your run):
 
 ```python
-from hfdask.routing import submit_on
+import json
+from pathlib import Path
+from hfdask.cluster import Cluster
 
-future = submit_on(
-    client, predict, batch,
-    tags={"GPU_MODEL_H200", "inference"},
-    resources={"GPU": 1, "RAM_GIB": 4},
-)
-result = future.result()
+Cluster.from_manifest(json.loads(Path(".hfdask/run-<id>.json").read_text())).close()
 ```
 
-Tags include `HAS_GPU`, `GPU_VENDOR_NVIDIA`, model-family tags such as
-`GPU_MODEL_H200`, flavor tags such as `FLAVOR_cpu-basic`, and custom group tags.
-`submit_on` enforces placement and raises when no registered worker matches.
-`workers_with(client, tags={...})` returns addresses for native Dask APIs.
+`Cluster.close()` cancels Jobs and verifies termination. Calling Dask's shutdown
+does not itself verify release of all HF Jobs. Reconcile ambiguous submissions
+by cluster labels before retrying, and do not delete the manifest until cleanup
+is verified. The manifest contains no private node keys and is not a task-resume
+checkpoint or a persistent-client credential.
 
-NVIDIA detection requires `nvidia-smi`; MIG partitions are unsupported.
-Clusters support up to 64 Jobs and 16 GPU workers per machine.
+## Execution limits
 
-## Storage and lifecycle
+The [CPU coordinator + four H200 example](examples/README.md) pairs
+[`examples/job.py`](examples/job.py) with [`examples/inference.yaml`](examples/inference.yaml).
+It reads Parquet prompts, applies `map_partitions(infer)`, and lazily caches one
+vLLM model per GPU worker. The vLLM import is module-level; model construction,
+not the import, is deferred to worker execution.
 
-Pass Hugging Face `Volume` objects through `JobSpec.volumes` to mount models,
-datasets, or buckets on every Job. Mount inputs read-only and outputs on a
-writable bucket. Pin model/data revisions and image digests for reproducibility.
+`predictions.compute()` gathers the **entire result into CPU coordinator RAM**,
+then writes `/output/results.parquet` once at the end. There are no per-shard
+durable checkpoints, output manifests, or resume/skip logic. The final write is
+not an atomic recovery protocol. Retrieve and validate outputs after success.
 
-Persist `cluster.manifest()` during submission. A partial launch raises
-`LaunchError`, whose `cluster` contains known Job handles. Reconcile ambiguous
-submissions by cluster labels before retrying. `cluster.close()` cancels Jobs
-and verifies termination. A local wait timeout leaves Jobs running until
-explicit cleanup or their remote timeout.
+Job-local disks and scheduler state are ephemeral; automatic whole-cluster
+resume is not implemented. Long workloads should write independently
+recoverable shards if they need durable progress.
 
-Write long workloads as independently recoverable shards. Job-local disks and
-scheduler state are ephemeral; automatic whole-cluster resume is not implemented.
-Retrieve outputs and verify their manifests after completion.
-
-## Transport
+## Security
 
 Iroh connects Jobs over authenticated encrypted QUIC. Dask services bind to
-loopback and nodes accept peers from their fixed identity roster.
-`public_relays=True` enables n0 discovery and public relay fallback.
-Alternatively, supply `relay_urls=["https://your-relay.example"]`; discovery
-still uses n0. Discovery and relay services can observe connection metadata.
+loopback and nodes accept peers from their fixed identity roster. The CLI
+currently requires explicit `network.public_relays: true`, enabling n0 discovery
+and public relay fallback. Discovery and relay services can observe connection
+metadata.
 
-Run trusted workload code and images. HF credentials stay in the submitting
-process; each node receives its own Iroh key through Job secrets.
-
-## Single-machine workloads
-
-`submit(JobSpec(...))` creates one HF Job containing a scheduler and
-`JobSpec.workers` worker processes. Its entrypoint uses the same workload contract.
+Run only trusted workload code and images: Dask tasks execute arbitrary Python
+and can access mounted data. HF credentials stay in the submitting process;
+each node receives its own Iroh key through Job secrets. Keep credentials out
+of the source bundle and grant mounts only the access the workload needs.
 
 ## Development
 
@@ -174,8 +147,6 @@ Run the opt-in encrypted transport tests with:
 ```sh
 HFDASK_TEST_KEYS=1 uv run pytest tests/test_iroh_integration.py
 ```
-
-See [examples](examples/README.md) for cross-Job verification details.
 
 ## License
 

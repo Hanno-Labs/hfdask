@@ -11,7 +11,7 @@ from hfdask.network import ALPN, Mesh
 
 @pytest.mark.skipif(os.environ.get("HFDASK_TEST_KEYS") != "1",
                     reason="requires explicit temporary-key test opt-in")
-@pytest.mark.parametrize("services,target", [(None, 1), ([0, 1, 1], 2)])
+@pytest.mark.parametrize("services,target", [(None, 1), ([0, 1, 1], 2), ([1], 0)])
 def test_real_quic_and_unknown_peer(services, target):
     async def check():
         iroh.iroh_ffi.uniffi_set_event_loop(asyncio.get_running_loop())
