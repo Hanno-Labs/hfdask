@@ -18,7 +18,15 @@ from typing import Any, cast
 
 from distributed import Client, LocalCluster
 
-from .jobs import _ENTRYPOINT
+from .config import RunConfig, RunnerMeshConfig
+
+
+def require_callable_entrypoint(entrypoint: str) -> Callable[..., Any]:
+    module_name, name = entrypoint.split(":")
+    function = getattr(importlib.import_module(module_name), name)
+    if not callable(function):
+        raise TypeError("entrypoint must be callable")
+    return cast(Callable[..., Any], function)
 
 
 def run(
@@ -30,14 +38,9 @@ def run(
     kwargs: dict[str, Any] | None = None,
 ) -> Any:
     """Call module:function(client, **kwargs) and close the cluster on every exit."""
-    if not _ENTRYPOINT.fullmatch(entrypoint):
-        raise ValueError("entrypoint must be module:function")
-    if workers < 1 or threads_per_worker < 1:
-        raise ValueError("worker and thread counts must be positive")
-    module_name, name = entrypoint.split(":")
-    function = getattr(importlib.import_module(module_name), name)
-    if not callable(function):
-        raise TypeError("entrypoint must be callable")
+    RunConfig(entrypoint=entrypoint, workers=workers, threads_per_worker=threads_per_worker,
+              memory_limit=memory_limit)
+    function = require_callable_entrypoint(entrypoint)
     print(json.dumps({"phase": "cluster_start", "workers": workers}), flush=True)
     with LocalCluster(  # type: ignore[no-untyped-call]  # Dask constructor lacks annotations.
         n_workers=workers,
@@ -50,7 +53,7 @@ def run(
     ) as cluster, Client(cluster, set_as_default=False) as client:  # type: ignore[no-untyped-call]
         client.wait_for_workers(workers, timeout=120)
         print(json.dumps({"phase": "cluster_ready", "workers": workers}), flush=True)
-        result = cast(Callable[..., Any], function)(client, **(kwargs or {}))
+        result = function(client, **(kwargs or {}))
     print(json.dumps({"phase": "workload_complete"}), flush=True)
     return result
 
@@ -101,12 +104,13 @@ async def run_mesh(args: argparse.Namespace, kwargs: dict[str, Any]) -> None:
 
     from .network import ALPN, Mesh
 
+    RunConfig(entrypoint=args.entrypoint, workers=args.workers,
+              threads_per_worker=args.threads_per_worker, memory_limit=args.memory_limit)
+    inputs = RunnerMeshConfig.model_validate({**json.loads(args.mesh), "node": args.node})
+    config = inputs.model_dump(by_alias=True, exclude_unset=True)
     # FFI annotates BaseEventLoop but uses the standard AbstractEventLoop interface.
     iroh.iroh_ffi.uniffi_set_event_loop(asyncio.get_running_loop())  # type: ignore[arg-type]
-    config = json.loads(args.mesh)
     secret = bytes.fromhex(os.environ.pop("HFDASK_NODE_KEY"))
-    if not config["public_relays"] and not config["relays"]:
-        raise ValueError("Relay policy must be explicit")
     relay_mode = (iroh.RelayMode.custom_from_urls(config["relays"])
                   if config["relays"] else iroh.RelayMode.default_mode())
     endpoint = await iroh.Endpoint.bind(iroh.EndpointOptions(
@@ -140,8 +144,7 @@ async def run_mesh(args: argparse.Namespace, kwargs: dict[str, Any]) -> None:
                         with Client(scheduler.address, set_as_default=False) as client:  # type: ignore[no-untyped-call]
                             client.wait_for_workers(args.workers,
                                                     timeout=config["startup_timeout"])
-                            module, name = args.entrypoint.split(":")
-                            getattr(importlib.import_module(module), name)(client, **kwargs)
+                            require_callable_entrypoint(args.entrypoint)(client, **kwargs)
                             # Ask workers to close; HF timeouts bound survivors on disconnect.
                             client.retire_workers(close_workers=True)
                     await asyncio.to_thread(workload)
@@ -217,8 +220,7 @@ async def run_detected(args: argparse.Namespace, config: dict[str, Any], endpoin
                 def workload() -> None:
                     with Client("tcp://127.0.0.1:21000", set_as_default=False) as client:  # type: ignore[no-untyped-call]
                         wait_topology(client, worker_nodes, config["startup_timeout"])
-                        module, name = args.entrypoint.split(":")
-                        getattr(importlib.import_module(module), name)(client, **kwargs)
+                        require_callable_entrypoint(args.entrypoint)(client, **kwargs)
                         client.retire_workers(close_workers=True)
                 await asyncio.to_thread(workload)
                 print(json.dumps({"phase": "workload_complete"}), flush=True)

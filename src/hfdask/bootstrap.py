@@ -17,28 +17,42 @@ MAX_SOURCE_BYTES = 8 * 1024 * 1024
 MAX_FILES = 2000
 
 
+def require_verified_payload(payload: bytes, checksum: str) -> None:
+    if len(payload) > MAX_ARCHIVE_BYTES:
+        raise SystemExit("hfdask compressed source exceeds 8 MiB")
+    if hashlib.sha256(payload).hexdigest() != checksum:
+        raise SystemExit("hfdask source SHA256 checksum mismatch")
+
+
+def require_extraction_budget(file_count: int, total: int) -> None:
+    if file_count > MAX_FILES or total > MAX_SOURCE_BYTES:
+        raise SystemExit("hfdask source archive exceeds extraction limits")
+
+
+def require_safe_archive_member(member: tarfile.TarInfo,
+                                names: set[PurePosixPath]) -> PurePosixPath:
+    path = PurePosixPath(member.name)
+    if (not member.isfile() or path.is_absolute() or ".." in path.parts
+            or not path.parts or member.size < 0 or path in names):
+        raise SystemExit("Unsafe hfdask source archive")
+    return path
+
+
 def main() -> None:
     extras = json.loads(sys.argv[1])
     with SOURCE.open("rb") as source:
         payload = source.read(MAX_ARCHIVE_BYTES + 1)
-    if len(payload) > MAX_ARCHIVE_BYTES:
-        raise SystemExit("hfdask compressed source exceeds 8 MiB")
-    if hashlib.sha256(payload).hexdigest() != sys.argv[2]:
-        raise SystemExit("hfdask source SHA256 checksum mismatch")
+    require_verified_payload(payload, sys.argv[2])
     print("hfdask: staging project source", flush=True)
     ROOT.mkdir(mode=0o700, parents=True, exist_ok=False)
     with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
-        members = []
+        members: list[tarfile.TarInfo] = []
         total = 0
-        names = set()
+        names: set[PurePosixPath] = set()
         for member in archive:
             total += member.size
-            if len(members) >= MAX_FILES or total > MAX_SOURCE_BYTES:
-                raise SystemExit("hfdask source archive exceeds extraction limits")
-            path = PurePosixPath(member.name)
-            if (not member.isfile() or path.is_absolute() or ".." in path.parts
-                    or not path.parts or member.size < 0 or path in names):
-                raise SystemExit("Unsafe hfdask source archive")
+            require_extraction_budget(len(members) + 1, total)
+            path = require_safe_archive_member(member, names)
             names.add(path)
             members.append(member)
         for member in members:

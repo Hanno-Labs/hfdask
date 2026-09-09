@@ -44,6 +44,33 @@ def test_cpu_profile_memory_cap():
     assert profile["tags"] == ["FLAVOR_cpu-basic"]
 
 
+@pytest.mark.parametrize("threads,memory", [(True, "auto"), (0, "auto"), (1, "0"),
+                                           (1, "-1 GiB"), (1, "bad")])
+def test_profile_input_contract(threads, memory):
+    with pytest.raises(ValueError):
+        worker_profiles({"cpu_threads": 2, "ram_bytes": 8 * GIB, "gpus": []},
+                        "cpu-basic", threads, memory)
+
+
+def test_profile_gpu_capacity_boundary():
+    with pytest.raises(ValueError, match="At most 16"):
+        worker_profiles({"cpu_threads": 2, "ram_bytes": 8 * GIB, "gpus": [{}] * 17},
+                        "gpu", 1)
+
+
+def test_routing_validates_before_scheduler_lookup():
+    client = MagicMock()
+    with pytest.raises(TypeError, match="collection"):
+        workers_with(client, tags="HAS_GPU")
+    with pytest.raises(ValueError):
+        workers_with(client, tags=[1])
+    for placement in ({"workers": ["other"]}, {"allow_other_workers": True}):
+        with pytest.raises(ValueError, match="owns worker placement"):
+            submit_on(client, abs, -1, tags=(tag for tag in ["HAS_GPU"]), **placement)
+    client.scheduler_info.assert_not_called()
+    client.submit.assert_not_called()
+
+
 def test_gpu_visibility(monkeypatch):
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-b")
     monkeypatch.setattr("shutil.which", lambda _: "nvidia-smi")

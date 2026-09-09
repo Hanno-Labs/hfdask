@@ -8,7 +8,6 @@ identity can access only this node's registered Dask services, not arbitrary TCP
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import logging
 import resource
 from collections.abc import Coroutine, Sequence
@@ -16,9 +15,16 @@ from typing import Any, Self
 
 import iroh
 
+from .config import MeshConfig
+
 ALPN = b"hfdask/1"
 CHUNK_SIZE = 65536
 logger = logging.getLogger(__name__)
+
+
+def require_expected_peer(actual: bytes, expected: bytes) -> None:
+    if actual != expected:
+        raise PermissionError("Unexpected peer identity")
 
 
 def authorized(peer_id: bytes, roster: Sequence[bytes]) -> bool:
@@ -67,17 +73,10 @@ class Mesh:
                  bind_host: str = "127.0.0.1",
                  services: Sequence[int] | None = None) -> None:
         owners = tuple(range(len(peers))) if services is None else tuple(services)
-        if not owners or any(owner < 0 or owner >= len(peers) for owner in owners):
-            raise ValueError("Every service must belong to a roster node")
-        if not 0 <= index < len(peers) or not 1024 <= base_port <= 65535 - len(owners):
-            raise ValueError("Invalid index or peer-port range")
         ids = [peer.id().to_bytes() for peer in peers]
-        if len(set(ids)) != len(ids) or endpoint.id().to_bytes() != ids[index]:
-            raise ValueError("Roster must contain unique identities and match this endpoint")
-        if max_connections < 1:
-            raise ValueError("max_connections must be positive")
-        if not ipaddress.ip_address(bind_host).is_loopback:
-            raise ValueError("Dask proxies must bind only to loopback")
+        MeshConfig(index=index, base_port=base_port, max_connections=max_connections,
+                   bind_host=bind_host, services=owners, peers=tuple(ids),
+                   endpoint_id=endpoint.id().to_bytes())
         self.endpoint = endpoint
         self.peers = tuple(peers)
         self.ids = ids
@@ -99,11 +98,18 @@ class Mesh:
                 logger.warning("mesh stream failed: %s", type(error).__name__)
         task.add_done_callback(finished)
 
-    async def __aenter__(self) -> Self:
+    def require_file_descriptor_budget(self) -> None:
         proxy_count = sum(owner != self.index for owner in self.services)
         soft_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
         if soft_limit != resource.RLIM_INFINITY and proxy_count + 2 * self.max_connections + 64 > soft_limit:
             raise RuntimeError("File descriptor limit is too low for the configured mesh")
+
+    def require_owned_service(self, service: int) -> None:
+        if not 0 <= service < len(self.services) or self.services[service] != self.index:
+            raise PermissionError("Service is not owned by this node")
+
+    async def __aenter__(self) -> Self:
+        self.require_file_descriptor_budget()
         try:
             for index, owner in enumerate(self.services):
                 if owner == self.index:
@@ -129,8 +135,7 @@ class Mesh:
             async with asyncio.timeout(30):
                 owner = self.services[index]
                 connection = await self.endpoint.connect(self.peers[owner], ALPN)
-                if connection.remote_id().to_bytes() != self.ids[owner]:
-                    raise PermissionError("Unexpected peer identity")
+                require_expected_peer(connection.remote_id().to_bytes(), self.ids[owner])
                 stream = await connection.open_bi()
                 await stream.send().write_all(b"D" + index.to_bytes(2, "big"))
                 if await stream.recv().read_exact(1) != b"K":
@@ -162,8 +167,7 @@ class Mesh:
                 if await stream.recv().read_exact(1) != b"D":
                     raise ConnectionError("Invalid stream preamble")
                 service = int.from_bytes(await stream.recv().read_exact(2), "big")
-                if service >= len(self.services) or self.services[service] != self.index:
-                    raise PermissionError("Service is not owned by this node")
+                self.require_owned_service(service)
                 reader, writer = await asyncio.open_connection(
                     self.bind_host, self.base_port + service)
             try:

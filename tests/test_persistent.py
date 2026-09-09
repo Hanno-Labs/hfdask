@@ -81,7 +81,8 @@ def test_client_rejects_wrong_identity(monkeypatch):
     monkeypatch.setattr(Identity, "public_id", lambda self: "wrong")
     with pytest.raises(ValueError, match="identity"):  # noqa: SIM117
         with connect({"connection": {"schema": 1, "persistent": True, "job_nodes": 1,
-                                      "peers": ["server", "client"]}}, Identity(b"a" * 32)):
+                                      "peers": ["server", "client"], "scheduler_worker": True,
+                                      "public_relays": True, "relays": []}}, Identity(b"a" * 32)):
             pass
 
 

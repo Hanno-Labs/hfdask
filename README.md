@@ -29,7 +29,7 @@ script dependencies, or custom Dockerfile is needed.
 ## Dependencies and bootstrap
 
 Dependencies come from `pyproject.toml` and `uv.lock`. The base install includes
-Dask, the HF client, YAML support, and Iroh encrypted transport. The `inference`
+Dask, the HF client, PyYAML, Pydantic v2 validation, and Iroh encrypted transport. The `inference`
 extra adds `dask[dataframe]` and vLLM (Linux x86_64 only). Do not pass `--extra inference`
 to the local launcher: YAML's `environment.extras: [inference]` selects that
 remote environment. Each Job runs `uv sync --locked --no-dev` with the selected
@@ -64,6 +64,42 @@ YAML-selected extras must also be declared in that project.
 | `mounts` | Storage sources, mount targets, and read-only settings |
 | `timeout` | Remote Job timeout |
 | `network.public_relays` | Explicit opt-in to public discovery and relay fallback |
+
+PyYAML safely loads the document; strict Pydantic schemas validate it before
+source staging or Job submission. Unknown keys are rejected at every YAML level.
+Counts must be integers (not booleans, quoted numbers, or floats); boolean fields
+must be YAML booleans, not quoted strings. `workers.count` defaults to 1 and must
+be 1–63; the optional coordinator worker is additional. `timeout` defaults to
+`1h` and accepts positive integer durations in `s`, `m`, `h`, or `d` (for example,
+`30m`). Public relay consent is always required, never inferred.
+
+Python configuration APIs use the same strict validation conventions.
+`JobSpec` and `WorkerGroup` remain frozen dataclasses with positional constructors
+and `dataclasses.replace` support. Schema validation failures raise
+`pydantic.ValidationError`, a `ValueError` subclass with structured field paths;
+this replaces the previous `TypeError` for some invalid configuration types.
+Validation does not coerce strings or booleans to worker counts, and error text
+is not a stable API. Workload kwargs retain standard-library JSON serialization
+semantics. Launch planning remains separate from configuration validation.
+
+Validation is organized around locally readable contracts, not a catch-all validator:
+`PositiveCount`, `Duration`, `RelativeScript`, `MountSource`, `MountTarget`,
+`CustomTag`, and `WorkloadKwargs` describe individual inputs. Named
+`AfterValidator` functions enforce concepts such as distinct identities and safe
+mount paths. `LaunchPlan.require_identity_per_job` and
+`PackagePlan.require_locked_runner_dependency` express relationships between inputs;
+launch plans validate the Job limit before expanding topology. Persistent workloads
+have an explicit empty-entrypoint/empty-kwargs contract. Runner mesh metadata is
+checked before endpoint startup. Local Dask accepts memory limit `"0"` to disable
+its limit; hardware-budgeted workers require a positive limit or `"auto"`.
+
+Runtime evidence is deliberately not treated as static configuration. Named
+boundaries still verify Git-selected files and source budgets, private bucket
+visibility, archive checksums and safe members, GPU capacity, matching live workers,
+peer identity, service ownership, and descriptor capacity. The bootstrap stays
+standard-library-only because it runs before the locked environment is installed.
+Protocol handshakes, connection admission, lifecycle deadlines, and cleanup checks
+remain next to the operations whose state they protect.
 
 Mount sources follow HF CLI conventions: `hf://models/namespace/repo`,
 `hf://datasets/namespace/repo`, `hf://spaces/namespace/repo`, or

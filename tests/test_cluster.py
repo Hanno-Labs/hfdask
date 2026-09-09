@@ -44,7 +44,7 @@ def test_hardware_overrides(monkeypatch, colocated, scheduler, worker, expected)
 @pytest.mark.parametrize("override", [{"scheduler_flavor": ""}, {"worker_flavor": " "}])
 def test_empty_hardware_rejected_before_submission(override):
     api = MagicMock(spec=HfApi)
-    with pytest.raises(ValueError, match="flavors"):
+    with pytest.raises(ValueError, match="flavor"):
         submit_cluster(JobSpec("example", "image", "workload:run"), [],
                        public_relays=True, api=api, **override)
     api.run_job.assert_not_called()

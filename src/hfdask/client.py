@@ -4,18 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-import math
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
 from .cluster import Identity
+from .config import ConnectConfig, ConnectionConfig
 
 _connection_lock = threading.Lock()
 
 
-async def _serve(config: dict[str, Any], identity: Identity,
+async def _serve(config: ConnectionConfig, identity: Identity,
                  ready: concurrent.futures.Future[None], stop: threading.Event,
                  timeout: float) -> None:
     import iroh
@@ -24,15 +24,15 @@ async def _serve(config: dict[str, Any], identity: Identity,
     from .network import ALPN, Mesh
 
     iroh.iroh_ffi.uniffi_set_event_loop(asyncio.get_running_loop())  # type: ignore[arg-type]
-    mode = (iroh.RelayMode.custom_from_urls(config["relays"])
-            if config["relays"] else iroh.RelayMode.default_mode())
+    mode = (iroh.RelayMode.custom_from_urls(config.relays)
+            if config.relays else iroh.RelayMode.default_mode())
     endpoint = await iroh.Endpoint.bind(iroh.EndpointOptions(
         preset=iroh.preset_n0(), secret_key=identity.secret, alpns=[ALPN], relay_mode=mode))
     try:
         await asyncio.wait_for(endpoint.online(), timeout=timeout)
         peers = [iroh.EndpointAddr(iroh.EndpointId.from_bytes(bytes.fromhex(peer)), None, [])
-                 for peer in config["peers"]]
-        nodes = config["job_nodes"]
+                 for peer in config.peers]
+        nodes = config.job_nodes
         async with Mesh(endpoint, peers, nodes, services=service_owners(nodes)):
             ready.set_result(None)
             while not stop.is_set():
@@ -53,18 +53,10 @@ def connect(manifest: dict[str, Any], identity: Identity, *,
 
     from .runner import wait_topology
 
-    if not math.isfinite(timeout) or timeout <= 0:
-        raise ValueError("timeout must be finite and positive")
-    config = manifest.get("connection")
-    if not config or config.get("schema") != 1 or not config.get("persistent"):
-        raise ValueError("A persistent cluster manifest is required")
-    nodes = config["job_nodes"]
-    if (not isinstance(nodes, int) or not 1 <= nodes <= 64
-            or len(config["peers"]) != nodes + 1
-            or identity.public_id() != config["peers"][-1]):
-        raise ValueError("Client identity or roster does not match")
-    if not config["public_relays"] and not config["relays"]:
-        raise ValueError("Relay policy must be explicit")
+    connection = ConnectionConfig.model_validate(manifest.get("connection"))
+    ConnectConfig(timeout=timeout, connection=connection, public_id=identity.public_id())
+    nodes = connection.job_nodes
+
     if not _connection_lock.acquire(blocking=False):
         raise RuntimeError("A mesh client is already connected in this process")
     ready: concurrent.futures.Future[None] = concurrent.futures.Future()
@@ -75,7 +67,7 @@ def connect(manifest: dict[str, Any], identity: Identity, *,
     def serve() -> None:
         nonlocal task
         asyncio.set_event_loop(loop)
-        task = loop.create_task(_serve(config, identity, ready, stopped, timeout))
+        task = loop.create_task(_serve(connection, identity, ready, stopped, timeout))
         try:
             loop.run_until_complete(task)
         except BaseException as error:  # noqa: BLE001 - propagate startup failures across threads.
@@ -91,7 +83,7 @@ def connect(manifest: dict[str, Any], identity: Identity, *,
         ready.result(timeout=timeout + 5)
         with Client("tcp://127.0.0.1:21000", timeout=timeout,
                     set_as_default=False) as client:  # type: ignore[no-untyped-call]
-            worker_nodes = set(range(1, nodes)) | ({0} if config["scheduler_worker"] else set())
+            worker_nodes = set(range(1, nodes)) | ({0} if connection.scheduler_worker else set())
             wait_topology(client, worker_nodes, timeout)
             yield client
     finally:

@@ -3,50 +3,69 @@
 from __future__ import annotations
 
 import json
-import math
-import re
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Annotated, Any
 
 from huggingface_hub import HfApi, Volume
+from pydantic import AfterValidator
+from pydantic.dataclasses import dataclass as validated_dataclass
 
-_ENTRYPOINT = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*:[A-Za-z_]\w*\Z")
+from .config import (
+    CONFIG,
+    DaskMemoryLimit,
+    Duration,
+    PositiveCount,
+    RunConfig,
+    Text,
+    WaitConfig,
+    require_entrypoint,
+)
+
 TERMINAL = frozenset({"COMPLETED", "ERROR", "CANCELED", "DELETED"})
 
 
-@dataclass(frozen=True)
+def require_optional_entrypoint(value: str) -> str:
+    return require_entrypoint(value) if value else value
+
+
+def require_json_kwargs(value: dict[str, Any]) -> dict[str, Any]:
+    # Preserve stdlib JSON semantics rather than coercing arbitrary workload objects.
+    json.dumps(value, allow_nan=False)
+    return value
+
+
+def require_absolute_volume(value: Volume) -> Volume:
+    if not value.mount_path.startswith("/"):
+        raise ValueError("volume mount_path must be absolute")
+    return value
+
+
+OptionalEntrypoint = Annotated[str, AfterValidator(require_optional_entrypoint)]
+WorkloadKwargs = Annotated[dict[str, Any], AfterValidator(require_json_kwargs)]
+AbsoluteVolume = Annotated[Volume, AfterValidator(require_absolute_volume)]
+
+
+@validated_dataclass(frozen=True, config=CONFIG)
 class JobSpec:
     """A batch job; the image must contain hfdask and the workload module."""
 
-    namespace: str
-    image: str
-    entrypoint: str = ""
-    flavor: str = "cpu-basic"
-    workers: int = 2
-    threads_per_worker: int = 1
-    memory_limit: str = "auto"
-    timeout: str = "1h"
-    kwargs: dict[str, Any] = field(default_factory=dict)
-    volumes: list[Volume] = field(default_factory=list)
+    namespace: Text
+    image: Text
+    entrypoint: OptionalEntrypoint = ""
+    flavor: Text = "cpu-basic"
+    workers: PositiveCount = 2
+    threads_per_worker: PositiveCount = 1
+    memory_limit: DaskMemoryLimit = "auto"
+    timeout: Duration = "1h"
+    kwargs: WorkloadKwargs = field(default_factory=dict)
+    volumes: list[AbsoluteVolume] = field(default_factory=list)
     bootstrap: tuple[str, ...] = ()
     env: dict[str, str] = field(default_factory=dict)
 
-    def __post_init__(self) -> None:
-        if not self.namespace.strip() or not self.image.strip():
-            raise ValueError("namespace and image are required")
-        if self.entrypoint and not _ENTRYPOINT.fullmatch(self.entrypoint):
-            raise ValueError("entrypoint must be module:function")
-        if self.workers < 1 or self.threads_per_worker < 1:
-            raise ValueError("worker and thread counts must be positive")
-        json.dumps(self.kwargs, allow_nan=False)
-        for volume in self.volumes:
-            if not volume.mount_path.startswith("/"):
-                raise ValueError("volume mount_path must be absolute")
-
     def command(self) -> list[str]:
-        if not self.entrypoint:
-            raise ValueError("Batch submissions require an entrypoint")
+        RunConfig(entrypoint=self.entrypoint, workers=self.workers,
+                  threads_per_worker=self.threads_per_worker)
         return [*self.bootstrap,
             "python", "-m", "hfdask.runner", self.entrypoint,
             "--workers", str(self.workers),
@@ -77,10 +96,7 @@ class Job:
 
     def wait(self, *, timeout: float = 3600, poll_interval: float = 30) -> str:
         """Wait for success; failures raise JobFailed, local deadlines TimeoutError."""
-        if not math.isfinite(timeout) or timeout < 0:
-            raise ValueError("timeout must be finite and nonnegative")
-        if not math.isfinite(poll_interval) or poll_interval <= 0:
-            raise ValueError("poll_interval must be finite and positive")
+        WaitConfig(timeout=timeout, poll_interval=poll_interval)
         deadline = time.monotonic() + timeout
         while True:
             stage = self.status()

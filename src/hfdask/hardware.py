@@ -11,6 +11,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from .config import ServiceConfig, WorkerConfig
+
 MAX_WORKERS_PER_NODE = 16
 GIB = 1024 ** 3
 
@@ -98,19 +100,22 @@ def detect() -> dict[str, Any]:
     return {"cpu_threads": cpus, "ram_bytes": memory, "gpus": gpu_inventory()}
 
 
+def require_supported_gpu_count(gpus: list[dict[str, Any]]) -> None:
+    if len(gpus) > MAX_WORKERS_PER_NODE:
+        raise ValueError("At most 16 GPU workers per Job are supported")
+
+
 def worker_profiles(inventory: dict[str, Any], flavor: str, threads: int,
                     memory_limit: str = "auto") -> list[dict[str, Any]]:
     from dask.utils import parse_bytes
 
+    WorkerConfig(threads=threads, memory_limit=memory_limit)
     gpus = inventory["gpus"]
+    require_supported_gpu_count(gpus)
     count = max(1, len(gpus))
-    if count > MAX_WORKERS_PER_NODE:
-        raise ValueError("At most 16 GPU workers per Job are supported")
     ram = int(inventory["ram_bytes"] * 0.8 / count)
     if memory_limit != "auto":
         requested = int(parse_bytes(memory_limit))
-        if requested <= 0:
-            raise ValueError("memory_limit must be positive or auto")
         ram = min(ram, requested)
     cpu = min(float(threads), inventory["cpu_threads"] / count)
     profiles = []
@@ -139,14 +144,13 @@ def service_owners(nodes: int) -> list[int]:
 
 
 def worker_service(nodes: int, node: int, ordinal: int) -> int:
-    if not 0 <= ordinal < MAX_WORKERS_PER_NODE or not 0 <= node < nodes:
-        raise ValueError("Invalid worker service")
+    ServiceConfig(nodes=nodes, node=node, ordinal=ordinal)
     return (node if node and ordinal == 0 else
             nodes + node * MAX_WORKERS_PER_NODE * 2 + ordinal * 2)
 
 
 def nanny_service(nodes: int, node: int, ordinal: int) -> int:
-    worker_service(nodes, node, ordinal)  # Validate all indices.
+    ServiceConfig(nodes=nodes, node=node, ordinal=ordinal)
     return nodes + node * MAX_WORKERS_PER_NODE * 2 + ordinal * 2 + 1
 
 

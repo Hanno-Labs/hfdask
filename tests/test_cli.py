@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from hfdask import bootstrap, cli
 from hfdask.cluster import Cluster, Identity, LaunchError, submit_cluster
@@ -83,7 +84,7 @@ def test_coordinator_worker_requires_boolean(project, worker):
     path.write_text(path.read_text().replace(
         "  flavor: cpu-basic", f"  flavor: cpu-basic\n  worker: {worker}"
     ))
-    with pytest.raises(TypeError, match=r"coordinator\.worker must be a boolean"):
+    with pytest.raises(ValidationError, match=r"coordinator\.worker"):
         cli.load_cluster(path, project, "job.py")
 
 
@@ -178,7 +179,7 @@ def test_invalid_worker_count(project, replacement):
 def test_mount_read_only_requires_boolean(project):
     path = project / "inference.yaml"
     path.write_text(path.read_text().replace("read_only: true", 'read_only: "true"'))
-    with pytest.raises(TypeError, match="mount.read_only must be a boolean"):
+    with pytest.raises(ValidationError, match=r"mounts\.0\.read_only"):
         cli.load_cluster(path, project, "job.py")
 
 
@@ -216,7 +217,7 @@ def test_repository_revision_must_be_nonempty_text(project, revision):
     path = project / "inference.yaml"
     path.write_text(path.read_text().replace("hf://buckets/", "hf://models/")
                     + f"    revision: {revision}\n")
-    with pytest.raises(ValueError, match="mount.revision"):
+    with pytest.raises(ValidationError, match=r"mounts\.0(?:\.revision)?"):
         cli.load_cluster(path, project, "job.py")
 
 

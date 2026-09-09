@@ -3,48 +3,134 @@
 from __future__ import annotations
 
 import json
-import math
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Annotated, Any, Self
 from uuid import uuid4
 
 from huggingface_hub import HfApi
+from pydantic import AfterValidator, Field, model_validator
+from pydantic.dataclasses import dataclass as validated_dataclass
 
+from .config import (
+    CONFIG,
+    LaunchConfig,
+    PersistentWorkloadConfig,
+    PositiveCount,
+    Text,
+    WaitConfig,
+    require_distinct_identities,
+)
 from .jobs import TERMINAL, Job, JobFailed, JobSpec
 
 
-@dataclass(frozen=True)
+def require_custom_tag(value: str) -> str:
+    if not value or value.startswith(("GPU_", "FLAVOR_", "HAS_GPU")):
+        raise ValueError("Custom tags must be nonempty and not impersonate hardware tags")
+    return value
+
+
+CustomTag = Annotated[str, AfterValidator(require_custom_tag)]
+
+
+@validated_dataclass(frozen=True, config=CONFIG)
 class WorkerGroup:
     """A count of remote HF machines of one flavor (not Dask processes)."""
 
-    flavor: str
-    count: int = 1
-    tags: tuple[str, ...] = ()
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.count, int) or isinstance(self.count, bool):
-            raise TypeError("Worker group count must be an integer")
-        if not self.flavor.strip() or isinstance(self.count, bool) or self.count < 1:
-            raise ValueError("Worker groups require a flavor and positive count")
-        if any(not tag or tag.startswith(("GPU_", "FLAVOR_", "HAS_GPU")) for tag in self.tags):
-            raise ValueError("Custom tags must be nonempty and not impersonate hardware tags")
+    flavor: Text
+    count: PositiveCount = 1
+    tags: tuple[CustomTag, ...] = ()
 
 
-@dataclass(frozen=True)
+@validated_dataclass(frozen=True, config=CONFIG)
 class Identity:
     """A caller-provided 32-byte Iroh secret. Never serialize this into a manifest."""
 
-    secret: bytes = field(repr=False)
-
-    def __post_init__(self) -> None:
-        if len(self.secret) != 32:
-            raise ValueError("Iroh identities require a 32-byte secret")
+    secret: Annotated[bytes, Field(min_length=32, max_length=32)] = field(repr=False)
 
     def public_id(self) -> str:
         import iroh
         return iroh.SecretKey.from_bytes(self.secret).public().to_bytes().hex()
+
+
+class LaunchPlan(LaunchConfig):
+    """Validated launch inputs and their resolved topology, before any submission."""
+
+    spec: JobSpec
+    identities: tuple[Identity, ...] = Field(repr=False, exclude=True)
+    client_identity: Identity | None = Field(default=None, repr=False, exclude=True)
+    worker_groups: Annotated[tuple[WorkerGroup, ...], Field(min_length=1)] | None = None
+
+    @model_validator(mode="after")
+    def require_one_worker_placement_policy(self) -> Self:
+        if self.worker_groups is not None and self.worker_flavor is not None:
+            raise ValueError("Use nonempty worker_groups instead of worker_flavor")
+        return self
+
+    @model_validator(mode="after")
+    def require_job_limit(self) -> Self:
+        # Count before expanding flavors: untrusted counts must not allocate huge lists.
+        if self.node_count > 64:
+            raise ValueError("At most 64 Jobs per cluster")
+        return self
+
+    @model_validator(mode="after")
+    def require_identity_per_job(self) -> Self:
+        if len(self.identities) != self.node_count:
+            raise ValueError("Provide one identity per Job")
+        return self
+
+    @model_validator(mode="after")
+    def require_distinct_job_and_client_identities(self) -> Self:
+        require_distinct_identities(tuple(self.peers))
+        return self
+
+    @model_validator(mode="after")
+    def require_workload_for_launch_mode(self) -> Self:
+        if self.client_identity is not None:
+            PersistentWorkloadConfig(entrypoint=self.spec.entrypoint, kwargs=self.spec.kwargs)
+        else:
+            self.spec.command()
+        return self
+
+    @property
+    def node_count(self) -> int:
+        return 1 + (sum(group.count for group in self.worker_groups)
+                    if self.worker_groups is not None
+                    else self.spec.workers - int(self.scheduler_worker))
+
+    @property
+    def node_flavors(self) -> list[str]:
+        remote = ([group.flavor for group in self.worker_groups for _ in range(group.count)]
+                  if self.worker_groups is not None else
+                  [self.worker_flavor or self.spec.flavor]
+                  * (self.spec.workers - int(self.scheduler_worker)))
+        return [self.scheduler_flavor or self.spec.flavor, *remote]
+
+    @property
+    def peers(self) -> list[str]:
+        identities = self.identities + ((self.client_identity,) if self.client_identity else ())
+        return [identity.public_id() for identity in identities]
+
+    @property
+    def connection(self) -> dict[str, Any]:
+        tags = ([list(group.tags) for group in self.worker_groups for _ in range(group.count)]
+                if self.worker_groups is not None else [[] for _ in self.node_flavors[1:]])
+        config = {"peers": self.peers, "relays": self.relays,
+                  "public_relays": self.public_relays, "startup_timeout": self.startup_timeout,
+                  "node_flavors": self.node_flavors, "node_tags": [[], *tags],
+                  "hardware_detection": True}
+        if self.client_identity is not None:
+            config.update(schema=1, persistent=True, job_nodes=len(self.node_flavors),
+                          scheduler_worker=self.scheduler_worker)
+        return config
+
+    @property
+    def command(self) -> list[str]:
+        spec = (replace(self.spec, entrypoint="hfdask.runner:main")
+                if self.client_identity is not None else self.spec)
+        return spec.command()
 
 
 @dataclass
@@ -96,10 +182,12 @@ class Cluster:
 
     @staticmethod
     def _timing(timeout: float, poll_interval: float) -> None:
-        if not math.isfinite(timeout) or timeout < 0:
-            raise ValueError("timeout must be finite and nonnegative")
-        if not math.isfinite(poll_interval) or poll_interval <= 0:
-            raise ValueError("poll_interval must be finite and positive")
+        WaitConfig(timeout=timeout, poll_interval=poll_interval)
+
+    def require_scheduler_job(self) -> Job:
+        if not self.jobs:
+            raise ValueError("Cluster has no scheduler job")
+        return self.jobs[0]
 
     def wait(self, *, timeout: float = 3600, poll_interval: float = 30) -> str:
         """Wait for driver completion, then release and verify remaining jobs.
@@ -108,11 +196,10 @@ class Cluster:
         submissions. A remote driver failure triggers cleanup before JobFailed.
         """
         self._timing(timeout, poll_interval)
-        if not self.jobs:
-            raise ValueError("Cluster has no scheduler job")
+        scheduler = self.require_scheduler_job()
         deadline = time.monotonic() + timeout
         while True:
-            stage = self.jobs[0].status()
+            stage = scheduler.status()
             if stage in TERMINAL:
                 self.close()
                 if stage != "COMPLETED":
@@ -154,57 +241,26 @@ def submit_cluster(
     Hardware overrides default independently to spec.flavor. A colocated worker
     shares the scheduler Job's hardware; worker_flavor applies to remote Jobs.
     """
-    scheduler_hardware = spec.flavor if scheduler_flavor is None else scheduler_flavor
-    worker_hardware = spec.flavor if worker_flavor is None else worker_flavor
-    if not scheduler_hardware.strip() or not worker_hardware.strip():
-        raise ValueError("Hardware flavors must not be empty")
-    if not public_relays and not relay_urls:
-        raise ValueError("Explicitly permit public relays or supply custom relay_urls")
-    if public_relays and relay_urls:
-        raise ValueError("Choose public or custom relays, not both")
-    if any(not url.startswith("https://") for url in relay_urls):
-        raise ValueError("Custom relays must use HTTPS")
-    if worker_groups is not None:
-        if not worker_groups or worker_flavor is not None:
-            raise ValueError("Use nonempty worker_groups instead of worker_flavor")
-        remote_flavors = [group.flavor for group in worker_groups for _ in range(group.count)]
-        node_tags = [[], *[list(group.tags) for group in worker_groups for _ in range(group.count)]]
-    else:
-        remote_flavors = [worker_hardware] * (spec.workers - int(scheduler_worker))
-        node_tags = [[] for _ in range(1 + len(remote_flavors))]
-    node_flavors = [scheduler_hardware, *remote_flavors]
-    node_count = len(node_flavors)
-    if node_count > 64:
-        raise ValueError("At most 64 Jobs per cluster")
-    if len(identities) != node_count or startup_timeout < 1:
-        raise ValueError("Provide one identity per Job and a positive deadline")
-    ids = [identity.public_id() for identity in identities]
-    if _client_identity is not None:
-        ids.append(_client_identity.public_id())
-    if len(set(ids)) != len(ids):
-        raise ValueError("Every job needs a distinct identity")
+    plan = LaunchPlan(spec=spec, identities=tuple(identities), client_identity=_client_identity,
+                      scheduler_flavor=scheduler_flavor, worker_flavor=worker_flavor,
+                      worker_groups=None if worker_groups is None else tuple(worker_groups),
+                      public_relays=public_relays, relays=list(relay_urls),
+                      startup_timeout=startup_timeout, scheduler_worker=scheduler_worker)
     client = api if api is not None else HfApi()
     cluster = Cluster(uuid4().hex, [])
-    config = {"peers": ids, "relays": list(relay_urls),
-                                "public_relays": public_relays,
-                                "startup_timeout": startup_timeout,
-                                "node_flavors": node_flavors,
-                                "node_tags": node_tags,
-                                "hardware_detection": True}
-    if _client_identity is not None:
-        config.update(schema=1, persistent=True, job_nodes=node_count,
-                      scheduler_worker=scheduler_worker)
+    config = plan.connection
+    if plan.client_identity is not None:
         cluster.connection = config
     configuration = json.dumps(config)
-    command = spec.command()
+    command = plan.command
     environment_kwargs: dict[str, Any] = {"env": spec.env} if spec.env else {}
     try:
-        for index, identity in enumerate(identities):
+        for index, identity in enumerate(plan.identities):
             info = client.run_job(
                 image=spec.image,
                 command=command + ["--mesh", configuration, "--node", str(index)]
                 + (["--scheduler-worker"] if scheduler_worker else []),
-                flavor=node_flavors[index],
+                flavor=plan.node_flavors[index],
                 namespace=spec.namespace, timeout=spec.timeout,
                 volumes=spec.volumes,
                 **environment_kwargs,
@@ -222,7 +278,6 @@ def submit_cluster(
 def boot_cluster(spec: JobSpec, identities: Sequence[Identity], *,
                  client_identity: Identity, **options: Any) -> Cluster:
     """Submit a persistent cluster; connect waits for readiness, close releases Jobs."""
-    if spec.entrypoint or spec.kwargs:
-        raise ValueError("Persistent clusters do not take an entrypoint or workload kwargs")
-    return submit_cluster(replace(spec, entrypoint="hfdask.runner:main"), identities,
+    PersistentWorkloadConfig(entrypoint=spec.entrypoint, kwargs=spec.kwargs)
+    return submit_cluster(spec, identities,
                           _client_identity=client_identity, **options)
