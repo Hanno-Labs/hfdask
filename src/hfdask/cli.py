@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import base64
+import hashlib
 import io
 import json
 import os
@@ -15,59 +15,24 @@ import sys
 import tarfile
 import tempfile
 import tomllib
+from dataclasses import replace
 from functools import partial
 from importlib import import_module
+from importlib.resources import files
 from pathlib import Path, PurePosixPath
 from typing import Any
+from uuid import uuid4
 
-from huggingface_hub import Volume
+from huggingface_hub import HfApi, Volume
 
 from .cluster import Cluster, Identity, LaunchError, submit_cluster
 from .jobs import JobSpec
 
-# Stay below Linux's per-argument limit as well as keeping API requests bounded.
-MAX_ARCHIVE_BYTES = 512 * 1024
-ARGV_CHUNK_BYTES = 32 * 1024
+# Bound both upload size and extracted working-tree size.
+MAX_ARCHIVE_BYTES = 8 * 1024 * 1024
 MAX_SOURCE_BYTES = 8 * 1024 * 1024
 MAX_FILES = 2000
 
-_BOOTSTRAP = '''import base64, io, json, os, pathlib, shutil, subprocess, sys, tarfile
-extras = json.loads(sys.argv[1])
-count = int(sys.argv[2])
-if not 1 <= count <= 22 or len(sys.argv) < 3 + count:
-    raise SystemExit("Invalid hfdask bootstrap chunk count")
-chunks = sys.argv[3:3 + count]
-if any(len(chunk) > 32768 for chunk in chunks):
-    raise SystemExit("hfdask bootstrap chunk exceeds 32 KiB")
-payload = base64.b64decode("".join(chunks), validate=True)
-if len(payload) > 524288:
-    raise SystemExit("hfdask compressed source exceeds 512 KiB")
-print("hfdask: staging project source", flush=True)
-root = pathlib.Path("/tmp/hfdask-project")
-root.mkdir(mode=0o700, parents=True, exist_ok=False)
-with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
-    members = archive.getmembers()
-    if len(members) > 2000 or sum(m.size for m in members) > 8388608:
-        raise SystemExit("hfdask source archive exceeds extraction limits")
-    for member in members:
-        path = pathlib.PurePosixPath(member.name)
-        if not member.isfile() or path.is_absolute() or ".." in path.parts:
-            raise SystemExit("Unsafe hfdask source archive")
-        target = root.joinpath(*path.parts)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with archive.extractfile(member) as source, target.open("xb") as output:
-            shutil.copyfileobj(source, output)
-        target.chmod(member.mode & 0o777)
-os.chdir(root)
-uv = shutil.which("uv")
-if uv is None:
-    raise SystemExit("environment.image must contain uv and Python")
-print("hfdask: syncing locked environment", flush=True)
-extra_args = [arg for extra in extras for arg in ("--extra", extra)]
-subprocess.run([uv, "sync", "--locked", "--no-dev", *extra_args], check=True)
-print("hfdask: starting runner", flush=True)
-os.execv(uv, [uv, "run", "--no-sync", *sys.argv[3 + count:]])
-'''
 
 
 def _mapping(value: Any, name: str, allowed: set[str]) -> dict[str, Any]:
@@ -96,7 +61,7 @@ def _secret_path(path: PurePosixPath) -> bool:
     )
 
 
-def package_project(root: Path, script: str, extras: list[str]) -> tuple[str, ...]:
+def package_project(root: Path, script: str, extras: list[str]) -> bytes:
     """Snapshot working-tree files, not HEAD; never follow project symlinks."""
     path = PurePosixPath(script)
     if path.is_absolute() or ".." in path.parts or path.suffix != ".py":
@@ -154,14 +119,10 @@ def package_project(root: Path, script: str, extras: list[str]) -> tuple[str, ..
     for extra in extras:
         dependencies.extend(optional[extra])
     own_project = project.get("name", "").lower().replace("_", "-") == "hfdask"
-    if own_project:
-        if "p2p" not in optional:
-            raise ValueError("The hfdask project must declare its p2p extra for mesh support")
-        if "p2p" not in extras:
-            extras = [*extras, "p2p"]
-    elif not any(re.match(r"(?i)^hfdask\s*\[[^\]]*\bp2p\b[^\]]*\]", dep)
-                 for dep in dependencies):
-        raise ValueError("Add hfdask[p2p] to project dependencies (uv add 'hfdask[p2p]') "
+    if not own_project and not any(
+        re.match(r"(?i)^hfdask\s*(?:\[|[<>=!~@;]|$)", dep) for dep in dependencies
+    ):
+        raise ValueError("Add hfdask to project dependencies (uv add hfdask) "
                          "and regenerate uv.lock; the runner must use the same locked environment")
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
@@ -171,22 +132,46 @@ def package_project(root: Path, script: str, extras: list[str]) -> tuple[str, ..
             member.mode = modes[name]
             archive.addfile(member, io.BytesIO(data))
     if buffer.tell() > MAX_ARCHIVE_BYTES:
-        raise ValueError("Compressed source exceeds 512 KiB bootstrap limit; move data to bucket "
+        raise ValueError("Compressed source exceeds 8 MiB upload limit; move data to bucket "
                          "mounts and exclude generated files with .gitignore")
-    encoded = base64.b64encode(buffer.getvalue()).decode()
-    chunks = tuple(encoded[index:index + ARGV_CHUNK_BYTES]
-                   for index in range(0, len(encoded), ARGV_CHUNK_BYTES))
-    return ("python", "-c", _BOOTSTRAP, json.dumps(extras), str(len(chunks)), *chunks)
+    return buffer.getvalue()
 
 
-def load_cluster(path: Path, root: Path, script: str) -> tuple[JobSpec, dict[str, Any], float]:
+def prepare_spec(spec: JobSpec, root: Path, script: str, extras: list[str], api: HfApi) -> JobSpec:
+    """Validate and stage source once; retained artifacts incur storage until deleted."""
+    payload = package_project(root, script, extras)
+    bucket_id = f"{spec.namespace}/jobs-artifacts"
+    folder = f"hfdask-source/{uuid4()}"
+    remote_path = f"{folder}/project.tar.gz"
+    api.create_bucket(bucket_id, private=True, exist_ok=True)
+    if api.bucket_info(bucket_id).private is not True:
+        raise ValueError(f"Source bucket {bucket_id} must be verified private; "
+                         "refusing upload without changing visibility")
+    bootstrap = files("hfdask").joinpath("bootstrap.py").read_bytes()
+    api.batch_bucket_files(bucket_id, add=[
+        (payload, remote_path), (bootstrap, f"{folder}/bootstrap.py"),
+    ])
+    print(f"Source artifact: hf://buckets/{bucket_id}/{remote_path} "
+          "(retained after run; storage charges may apply until manually deleted)", file=sys.stderr)
+    return replace(spec, bootstrap=("python3", "/tmp/hfdask-source/bootstrap.py", json.dumps(extras),
+                                    hashlib.sha256(payload).hexdigest()),
+                   volumes=[*spec.volumes, Volume(type="bucket", source=bucket_id, path=folder,
+                            mount_path="/tmp/hfdask-source", read_only=True)])
+
+
+def load_cluster(
+    path: Path, root: Path, script: str,
+) -> tuple[JobSpec, dict[str, Any], float, list[str]]:
     # Load lazily so non-CLI library users do not need PyYAML at import time.
     yaml = import_module("yaml")
 
     config = _mapping(yaml.safe_load(path.read_text()), "cluster",
                       {"namespace", "coordinator", "workers", "environment", "timeout",
                        "mounts", "network"})
-    coordinator = _mapping(config.get("coordinator", {}), "coordinator", {"flavor"})
+    coordinator = _mapping(config.get("coordinator", {}), "coordinator", {"flavor", "worker"})
+    scheduler_worker = coordinator.get("worker", False)
+    if type(scheduler_worker) is not bool:
+        raise TypeError("coordinator.worker must be a boolean")
     workers = _mapping(config.get("workers", {}), "workers", {"flavor", "count"})
     environment = _mapping(config.get("environment", {}), "environment", {"image", "extras"})
     network = _mapping(config.get("network", {}), "network", {"public_relays"})
@@ -212,39 +197,58 @@ def load_cluster(path: Path, root: Path, script: str) -> tuple[JobSpec, dict[str
         raise TypeError("mounts must be a list")
     volumes: list[Volume] = []
     for item in mounts:
-        mount = _mapping(item, "mount", {"source", "target", "read_only"})
+        mount = _mapping(item, "mount", {"source", "target", "read_only", "revision"})
         source = _text(mount.get("source"), "mount.source")
         target = _text(mount.get("target"), "mount.target")
-        if not re.fullmatch(r"hf://buckets/[^/]+/[^/]+(?:/.*)?", source):
-            raise ValueError("mount.source must be hf://buckets/namespace/bucket[/prefix]")
+        location = re.fullmatch(
+            r"hf://(buckets|models|datasets|spaces)/([^/]+)/([^/]+)(?:/(.*))?", source,
+        )
+        if location is None:
+            raise ValueError("mount.source must be hf://{buckets,models,datasets,spaces}/"
+                             "namespace/name[/prefix]")
+        kind, namespace, name, subfolder = location.groups()
+        subfolder = subfolder or ""
         target_path = PurePosixPath(target)
         if (not target_path.is_absolute() or ".." in target_path.parts
                 or target_path == PurePosixPath("/")):
             raise ValueError("mount.target must be an absolute non-root path without '..'")
-        project_path = PurePosixPath("/tmp/hfdask-project")
-        if target_path.is_relative_to(project_path) or project_path.is_relative_to(target_path):
-            raise ValueError("mount.target must not overlap /tmp/hfdask-project")
+        for reserved in ("/tmp/hfdask-project", "/tmp/hfdask-source"):
+            reserved_path = PurePosixPath(reserved)
+            if (target_path.is_relative_to(reserved_path)
+                    or reserved_path.is_relative_to(target_path)):
+                raise ValueError(f"mount.target must not overlap {reserved}")
         read_only = mount.get("read_only", True)
         if type(read_only) is not bool:
             raise TypeError("mount.read_only must be a boolean")
-        volumes.append(Volume(type="bucket", source=source.removeprefix("hf://buckets/"),
-                              mount_path=target, read_only=read_only))
+        revision = None
+        if "revision" in mount:
+            if kind == "buckets":
+                raise ValueError("mount.revision is only supported for repositories, not buckets")
+            revision = _text(mount["revision"], "mount.revision")
+        if kind != "buckets" and not read_only:
+            raise ValueError("Model, dataset, and Space mounts must be read-only")
+        if ".." in PurePosixPath(subfolder).parts or subfolder.startswith("/"):
+            raise ValueError("mount.source prefix must be relative without '..'")
+        volumes.append(Volume(type=kind[:-1], source=f"{namespace}/{name}", revision=revision,
+                              path=subfolder, mount_path=target, read_only=read_only))
     spec = JobSpec(
         namespace=_text(config.get("namespace"), "namespace"),
         image=_text(environment.get("image"), "environment.image (must contain uv and Python)"),
-        entrypoint="hfdask.runner:run_script", kwargs={"script": script}, workers=count,
+        entrypoint="hfdask.runner:run_script", kwargs={"script": script},
+        # YAML counts remote workers; JobSpec includes the colocated worker.
+        workers=count + int(scheduler_worker),
         flavor=_text(workers.get("flavor", "cpu-basic"), "workers.flavor"),
-        timeout=timeout, volumes=volumes, bootstrap=package_project(root, script, extras),
+        timeout=timeout, volumes=volumes,
         env={"PYTHONPATH": "/tmp/hfdask-project:"
-                                  + str(PurePosixPath("/tmp/hfdask-project") / PurePosixPath(script).parent),
-                     "DASK_DISTRIBUTED__WORKER__DAEMON": "False",
+                          + str(PurePosixPath("/tmp/hfdask-project") / PurePosixPath(script).parent),
+             "DASK_DISTRIBUTED__WORKER__DAEMON": "False",
              "DASK_DISTRIBUTED__WORKER__MULTIPROCESSING_METHOD": "spawn",
              "VLLM_WORKER_MULTIPROC_METHOD": "spawn"},
     )
-    options: dict[str, Any] = {"public_relays": True, "scheduler_worker": False,
+    options: dict[str, Any] = {"public_relays": True, "scheduler_worker": scheduler_worker,
                "scheduler_flavor": _text(coordinator.get("flavor", "cpu-basic"),
                                          "coordinator.flavor")}
-    return spec, options, float(seconds)
+    return spec, options, float(seconds), extras
 
 
 def save_manifest(path: Path, cluster: Cluster) -> None:
@@ -278,9 +282,10 @@ def main(argv: list[str] | None = None) -> int:
     manifest: Path = (args.manifest if args.manifest is not None
                       else Path(".hfdask") / f"run-{secrets.token_hex(8)}.json")
     try:
-        spec, options, timeout = load_cluster(args.cluster, Path.cwd(), args.script)
-        identities = [Identity(secrets.token_bytes(32)) for _ in range(spec.workers + 1)]
-        # Fail for missing local p2p support before reserving the manifest or submitting.
+        spec, options, timeout, extras = load_cluster(args.cluster, Path.cwd(), args.script)
+        nodes = spec.workers + 1 - int(options["scheduler_worker"])
+        identities = [Identity(secrets.token_bytes(32)) for _ in range(nodes)]
+        # Validate transport identities before reserving the manifest or submitting.
         for identity in identities:
             identity.public_id()
 
@@ -288,8 +293,10 @@ def main(argv: list[str] | None = None) -> int:
         with manifest.open("x") as output:
             output.write('{}\n')
         print(f"Recovery manifest: {manifest}", file=sys.stderr)
+        api = HfApi()
+        spec = prepare_spec(spec, Path.cwd(), args.script, extras, api)
         try:
-            cluster = submit_cluster(spec, identities, **options,
+            cluster = submit_cluster(spec, identities, api=api, **options,
                                      on_submitted=partial(save_manifest, manifest))
         except LaunchError as error:
             cluster = error.cluster
@@ -299,6 +306,8 @@ def main(argv: list[str] | None = None) -> int:
     # CLI boundary: report failures and release known jobs before returning an exit code.
     except (Exception, KeyboardInterrupt) as error:  # noqa: BLE001
         print(f"hfdask: {error or 'interrupted'}", file=sys.stderr)
+        if isinstance(error, LaunchError) and error.__cause__ is not None:
+            print(f"Submission cause: {error.__cause__}", file=sys.stderr)
         if cluster is not None:
             try:
                 save_manifest(manifest, cluster)

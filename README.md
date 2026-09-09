@@ -7,39 +7,46 @@ resources, and authenticated encrypted connections.
 ## Run a script with the CLI
 
 Authenticate the submitting machine with `hf auth login`. From this repository's
-root, configure the namespace and bucket mounts in
-[`examples/inference.yaml`](examples/inference.yaml), stage the model and prompts
-as described in [examples](examples/README.md), then run:
+root, configure the namespace and a fresh, seeded output bucket prefix in
+[`examples/inference.yaml`](examples/inference.yaml), as described in
+[examples](examples/README.md). Models and datasets are mounted directly from the Hub;
+no input bucket or manual input staging is needed.
+Then run:
 
 ```sh
-uv lock
-uv run --extra p2p hfdask run --cluster examples/inference.yaml examples/job.py
+uv sync --no-dev
+uv run --no-sync hfdask run --cluster examples/inference.yaml examples/job.py
 ```
 
-This launches a `cpu-basic` coordinator and four `h200` worker Jobs. Submission
-reserves paid HF Jobs; verify hardware access and budget first. The coordinator
-runs the scheduler and ordinary Python script with the cluster's Dask client
-made current, so `.compute()` uses the remote workers. There is no Dask worker
-on the coordinator: only the GPUs execute Dask tasks in this example.
-No `run(client, ...)` wrapper, inline script dependencies, or custom Dockerfile
-is needed.
+This launches two Jobs: a `cpu-basic` coordinator and one `l4x1` GPU worker
+Job. Submission reserves paid HF Jobs; verify hardware access and budget first.
+The coordinator runs the scheduler and ordinary Python script with the cluster's
+Dask client made current. The example sets `coordinator.worker: true` to enable
+a CPU Dask worker in that same scheduler Job, so preparation and output writing
+run on CPU while inference runs on GPU. No `run(client, ...)` wrapper, inline
+script dependencies, or custom Dockerfile is needed.
 
 ## Dependencies and bootstrap
 
-Dependencies come from `pyproject.toml` and `uv.lock`. PyYAML is a base dependency;
-the `inference` extra adds `dask[dataframe]` and vLLM (Linux x86_64 only). Keep the
-local command on `--extra p2p`, **not** `--extra inference`: the latter can install
-the large GPU stack locally on Linux x86_64. YAML's `environment.extras:
-[inference]` selects the remote environment; hfdask adds its own `p2p` extra there.
-Each Job runs `uv sync --locked --no-dev` with those extras before starting.
+Dependencies come from `pyproject.toml` and `uv.lock`. The base install includes
+Dask, the HF client, YAML support, and Iroh encrypted transport. The `inference`
+extra adds `dask[dataframe]` and vLLM (Linux x86_64 only). Do not pass `--extra inference`
+to the local launcher: YAML's `environment.extras: [inference]` selects that
+remote environment. Each Job runs `uv sync --locked --no-dev` with the selected
+extras before starting; the submitting machine does not need PyTorch or vLLM.
 
-The YAML explicitly uses the stock Python + uv image
-`ghcr.io/astral-sh/uv:python3.12-bookworm-slim`. CUDA user-space libraries come
-from the installed wheels; compatible NVIDIA drivers must come from the GPU
-host. This is offline Python inference, not a vLLM serving container. Pin a tested
-image digest for production; the four-H200 inference path has **not** been GPU-validated.
+The YAML uses the official `vllm/vllm-openai:v0.29.0` image, pinned to its Linux
+amd64 digest, for CUDA tooling (including `nvcc`), Python, and uv. Despite the
+image name, hfdask runs its Python bootstrap, not the OpenAI server. HF recommends
+this runtime for [offline batch inference with uv](https://huggingface.co/docs/hub/jobs-popular-images#vllm).
 
-External projects must declare `hfdask[p2p]` in their dependencies (or a selected
+`uv sync` still installs the project's locked dependencies into an isolated
+virtual environment; it does not reuse the image's preinstalled Python packages.
+The pinned image release matches vLLM 0.29.0 in `uv.lock`; keep these compatible
+when upgrading. The GPU host supplies the NVIDIA driver.
+
+
+External projects must declare `hfdask` in their dependencies (or a selected
 project extra) and regenerate `uv.lock`. Their workload dependencies and any
 YAML-selected extras must also be declared in that project.
 
@@ -51,15 +58,24 @@ YAML-selected extras must also be declared in that project.
 |---|---|
 | `namespace` | HF namespace that owns the Jobs |
 | `coordinator.flavor` | Hardware for the scheduler and script |
+| `coordinator.worker` | Enable a Dask worker in the scheduler Job (default `false`) |
 | `workers.flavor`, `workers.count` | Remote worker hardware and number of machines |
 | `environment.image`, `environment.extras` | Bootstrap image and locked project extras |
 | `mounts` | Storage sources, mount targets, and read-only settings |
 | `timeout` | Remote Job timeout |
 | `network.public_relays` | Explicit opt-in to public discovery and relay fallback |
 
-Mount models and datasets read-only and outputs on a writable bucket. Use a
-fresh output prefix for every run, verify bucket ownership/privacy, and pin
-model/data revisions and image digests for reproducibility.
+Mount sources follow HF CLI conventions: `hf://models/namespace/repo`,
+`hf://datasets/namespace/repo`, `hf://spaces/namespace/repo`, or
+`hf://buckets/namespace/bucket`, optionally followed by a subfolder. Repository
+mounts are read-only and accept a `revision` (branch, tag, or commit; defaults
+to the Hub's `main`). Bucket mounts do not accept revisions; explicitly set
+`read_only: false` for outputs.
+
+This example pins the model and dataset commits in YAML, mounting them at
+`/model` and `/dataset`. Files are fetched on demand; the workload only reads
+filesystem paths. Use a fresh, seeded writable output prefix for every run and
+verify ownership/privacy.
 
 Worker machines detect hardware at startup. CPU machines run one worker;
 NVIDIA machines run one worker per visible GPU, each with its own
@@ -74,8 +90,16 @@ project-relative script. The CLI ships current working-tree contents, including
 eligible untracked files, rather than just committed `HEAD`. Ignored files and
 recognized secret paths are excluded; symlinks are rejected. Review what is
 included: filename filtering cannot detect every secret. Keep data and model
-weights in mounts. Source limits are **512 KiB compressed, 8 MiB uncompressed,
-and 2,000 files**, including the lockfile.
+weights out of the source bundle; use mounts. Source limits are **8 MiB compressed,
+8 MiB uncompressed, and 2,000 files**, including the lockfile.
+
+Like `hf jobs uv run`, the launcher automatically creates or reuses the namespace's
+`jobs-artifacts` bucket and stages files in a unique subfolder. It verifies that
+the bucket is private before uploading your project archive, mounts that subfolder
+read-only, and verifies the archive checksum before extraction. No source-bucket
+configuration is required.
+The CLI prints the artifact URI; source artifacts are retained after the run and
+incur storage charges until removed, as with HF's artifact-staging pattern.
 
 ## Cleanup and recovery
 
@@ -105,16 +129,35 @@ checkpoint or a persistent-client credential.
 
 ## Execution limits
 
-The [CPU coordinator + four H200 example](examples/README.md) pairs
-[`examples/job.py`](examples/job.py) with [`examples/inference.yaml`](examples/inference.yaml).
-It reads Parquet prompts, applies `map_partitions(infer)`, and lazily caches one
-vLLM model per GPU worker. The vLLM import is module-level; model construction,
-not the import, is deferred to worker execution.
+The [AG News smoke example](examples/README.md) uses standard `dask.delayed`
+tasks for a CPU → GPU → CPU pipeline. CPU worker addresses are selected from
+scheduler information where the `GPU` resource is absent or zero. Preparation,
+concatenation, and saving are restricted to those addresses; inference tasks
+request `resources={"GPU": 1}`. `summary.compute(optimize_graph=False)` preserves
+the separately annotated stage boundaries.
 
-`predictions.compute()` gathers the **entire result into CPU coordinator RAM**,
-then writes `/output/results.parquet` once at the end. There are no per-shard
-durable checkpoints, output manifests, or resume/skip logic. The final write is
-not an atomic recovery protocol. Retrieve and validate outputs after success.
+On a CPU worker, `prepare` reads the mounted test Parquet, samples 128 rows
+(32 per category, seed 23), and splits them into eight 16-row partitions.
+`WorkerSetup` skips CPU workers and loads the Qwen3-0.6B engine from `/model`
+once per GPU worker, including workers that join or restart later. The same
+graph supports multiple GPU workers, with one worker per visible GPU.
+Both Hub revisions are pinned in [`examples/inference.yaml`](examples/inference.yaml),
+not in workload code.
+
+CPU tasks concatenate predictions and write `/output/results.parquet`
+(`id`, `text`, `label`, `prediction`) and `/output/summary.json` with row count,
+invalid-prediction count, and accuracy. Only the summary is collected by the
+script submitting the graph. The `inference` event topic includes `prepared`
+and `results_saved` alongside model-loading and partition-completion events.
+Metrics are descriptive, not pass/fail thresholds. The YAML and HF Job volume
+configuration record the input repository revisions. This is not streaming
+output or an atomic recovery protocol.
+There are no per-shard checkpoints or resume/skip-existing semantics.
+
+The [AG News card](https://huggingface.co/datasets/fancyzhx/ag_news) lists its
+license as unknown and describes research purposes; public access is not a
+blanket reuse license. [Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B) uses
+Apache-2.0. Review terms before reusing or redistributing inputs or outputs.
 
 Job-local disks and scheduler state are ephemeral; automatic whole-cluster
 resume is not implemented. Long workloads should write independently
@@ -124,7 +167,7 @@ recoverable shards if they need durable progress.
 
 Iroh connects Jobs over authenticated encrypted QUIC. Dask services bind to
 loopback and nodes accept peers from their fixed identity roster. The CLI
-currently requires explicit `network.public_relays: true`, enabling n0 discovery
+requires explicit `network.public_relays: true`, enabling n0 discovery
 and public relay fallback. Discovery and relay services can observe connection
 metadata.
 
@@ -136,7 +179,7 @@ of the source bundle and grant mounts only the access the workload needs.
 ## Development
 
 ```sh
-uv sync --extra p2p --group dev
+uv sync --group dev
 uv run pytest
 uv run ruff check .
 uv run mypy src

@@ -2,25 +2,30 @@ namespace: your-namespace
 
 coordinator:
   flavor: cpu-basic
+  worker: true
 
 workers:
-  flavor: h200
-  count: 4
+  flavor: l4x1
+  count: 1
 
 environment:
-  # Python + uv, not a vLLM server. Pin a tested image digest for production.
-  image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+  # v0.29.0, Linux amd64: CUDA tooling + Python + uv; hfdask runs no server.
+  image: vllm/vllm-openai:v0.29.0@sha256:082ca6f035279109041ffd3fe0695cb568b29bc580b35c4f297a66a08b216c1b
   extras: [inference]
 
 mounts:
-  - source: hf://buckets/your-namespace/input
-    target: /input
-    read_only: true
-  - source: hf://buckets/your-namespace/output
+  - source: hf://models/Qwen/Qwen3-0.6B
+    revision: c1899de289a04d12100db370d81485cdf75e47ca
+    target: /model
+  - source: hf://datasets/fancyzhx/ag_news
+    revision: eb185aade064a813bc0b7f42de02595523103ca4
+    target: /dataset
+  # Use a fresh, seeded prefix for each run.
+  - source: hf://buckets/your-namespace/output/ag-news-run-001
     target: /output
     read_only: false
 
-timeout: 2h
+timeout: 30m
 
 network:
   public_relays: true

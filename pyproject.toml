@@ -10,10 +10,15 @@ readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
-dependencies = ["huggingface-hub>=1.29,<2", "dask[distributed]>=2025.1,<2027", "PyYAML>=6,<7"]
+dependencies = [
+    "huggingface-hub>=1.29,<2",
+    "dask[distributed]>=2025.1,<2027",
+    "PyYAML>=6,<7",
+    "iroh==1.1.0",
+]
 
 [project.optional-dependencies]
-p2p = ["iroh==1.1.0"]
+
 inference = [
     "dask[dataframe]>=2025.1,<2027",
     "vllm>=0.10,<1; sys_platform == 'linux' and platform_machine == 'x86_64'",

@@ -1,117 +1,135 @@
-# Offline vLLM: CPU coordinator + four H200 workers
+# AG News demo: CPU → GPU → CPU
 
-The main example is [`job.py`](job.py), an ordinary Dask script, with cluster
-configuration in [`inference.yaml`](inference.yaml). No custom Dockerfile, image
-build, or inline dependency block is needed. One `cpu-basic` Job runs the
-scheduler and script; four `h200` Jobs run
-the Dask workers. **Five Jobs, four Dask workers, four independent GPUs.** The
-CPU coordinator is not a Dask worker. This is data-parallel offline inference,
-not a model spread across four GPUs and not a vLLM server.
+[`job.py`](job.py) is an ordinary `dask.delayed` script using
+[`inference.yaml`](inference.yaml). By default, two Jobs run the pipeline:
+one `cpu-basic` Job hosts the scheduler, script, and CPU worker; one `l4x1` Job
+hosts one GPU worker. `coordinator.worker: true` enables the CPU worker inside
+the scheduler Job without adding another Job; the setting defaults to `false`.
+This is offline vLLM inference, not a serving process or a model spread across
+GPUs. Multiple GPU workers are supported, with one worker per visible GPU.
 
 ## Configure and run
 
-1. Authenticate locally with `hf auth login` and set `namespace` in the YAML.
-   Submission reserves paid HF Jobs; verify hardware access and budget first.
-2. Stage a complete, pinned model snapshot, including tokenizer, under the input
-   bucket's `model/`, and Parquet files under `prompts/`. Each row needs string
-   `id` and `prompt` fields; use globally unique IDs and raw completion prompts
-   suitable for the model. No chat template is applied. Choose a model that fits
-   one H200 and keep prompts plus the requested 128 output tokens within 4096
-   tokens. Size Parquet partitions for sensible inference batches.
-3. Set the read-only input source to `hf://buckets/your-namespace/input`, mounted
-   at `/input`. Set a separate writable output source to a **fresh run prefix**,
-   for example `hf://buckets/your-namespace/output/run-001`, mounted at `/output`.
-   The checked-in YAML uses the output bucket root; change it before each run.
-   Create the buckets and verify ownership/privacy before submission.
-4. Review `coordinator.flavor: cpu-basic`, `workers.flavor: h200`,
-   `workers.count: 4`, and `timeout: 2h`. The count is remote machines. The CLI
-   currently requires explicit `network.public_relays: true`, permitting public
-   n0 discovery/relay fallback and its connection-metadata exposure.
-5. From the repository root:
+1. Authenticate locally with `hf auth login`; set `namespace` in the YAML.
+   Submission reserves paid HF Jobs: verify hardware access and budget first.
+2. Create an output bucket, verify ownership/privacy, and choose a **fresh prefix
+   for every run**, such as `hf://buckets/your-namespace/output/ag-news-run-001`.
+   Seed that prefix by uploading a small marker file before submission, then set
+   it as the YAML's writable `/output` mount. The YAML also mounts the pinned
+   model at `/model` and dataset at `/dataset`, both read-only.
+   **No input bucket, model staging, or dataset staging is needed**.
+3. Keep `coordinator.worker: true` for the CPU stages. Review
+   `workers.flavor: l4x1`, `workers.count: 1`, and `timeout: 30m`.
+   Required `network.public_relays: true` permits public n0 discovery and relay
+   fallback, exposing connection metadata to those services.
+4. From the repository root:
 
    ```sh
-   uv lock
-   uv run --extra p2p hfdask run --cluster examples/inference.yaml examples/job.py
+   uv sync --no-dev
+   uv run --no-sync hfdask run --cluster examples/inference.yaml examples/job.py
    ```
 
-The CLI generates distinct node identities, ships the project, waits for the
-workers, and executes the script on the CPU coordinator with the cluster's Dask
-client made current. Native Dask operations such as `.compute()` use that client;
-no `run(client, ...)` entrypoint or manual cluster connection is needed.
+Iroh encrypted transport is included in the base install.
+Do not install `--extra inference` locally: YAML's
+`environment.extras: [inference]` selects the remote dataframe/vLLM dependencies.
+Each Job syncs the shipped lock with `uv sync --locked --no-dev` and those extras,
+including the CPU coordinator. The launcher needs no local PyTorch or vLLM.
 
-### Locked dependencies and image
+The image is official `vllm/vllm-openai:v0.29.0`, pinned to its Linux amd64 digest
+in YAML: no custom Dockerfile or image build. It supplies CUDA tooling, including
+`nvcc`, plus Python and uv, as recommended by the
+[HF Jobs image guide](https://huggingface.co/docs/hub/jobs-popular-images#vllm).
+hfdask runs its bootstrap instead of the serving entrypoint; inference is offline.
+The GPU host must provide compatible NVIDIA drivers and `nvidia-smi`.
 
-`pyproject.toml` declares PyYAML as a base dependency. Its `inference` extra
-contains `dask[dataframe]` and vLLM, with vLLM restricted to Linux x86_64.
-`uv lock` resolves the project without installing the inference stack locally.
-Use **`--extra p2p` locally**, not `--extra inference`, which can install the
-large GPU stack on a Linux x86_64 submitter. YAML's `environment.extras:
-[inference]` selects dependencies for remote Jobs; the CLI also adds `p2p` when
-shipping this hfdask project. Every Job syncs the shipped lock with
-`uv sync --locked --no-dev` and the selected extras.
+The isolated uv environment still installs the locked project dependencies,
+not the image's preinstalled Python packages. The image release matches vLLM
+0.29.0 in `uv.lock`; keep them compatible when upgrading. The CLI configures non-daemon workers and spawn
+multiprocessing, ships current working-tree source, and makes the cluster's Dask
+client current for the script. Following `hf jobs uv run`'s staging pattern,
+it automatically uploads project source to a unique prefix in a private
+`jobs-artifacts` bucket and mounts it read-only. No manual source upload is needed.
+See [source shipping](../README.md#source-shipping) for exclusions, size limits,
+and artifact retention; keep weights, data, and secrets out of the bundle.
 
-`environment.image` explicitly names the stock Python + uv image
-`ghcr.io/astral-sh/uv:python3.12-bookworm-slim`. There is no default vLLM image,
-CUDA image build, or serving process. Installed wheels supply CUDA user-space
-libraries; the GPU host must supply compatible NVIDIA drivers and `nvidia-smi`
-for hardware discovery. All nodes use the same locked environment, including
-the CPU coordinator. Pin a tested image digest for production. The CLI configures
-non-daemon Dask workers and spawn multiprocessing for Dask and vLLM.
+## Inputs and execution
 
-External projects must declare `hfdask[p2p]` in their project dependencies (or a
-selected extra), declare their workload dependencies and YAML-selected extras,
-and regenerate `uv.lock`.
+The script selects CPU worker addresses from `client.scheduler_info()` where
+worker resources have no `GPU` entry or a value of zero. It requires both CPU-only
+and GPU workers and builds three stages with standard `dask.delayed` tasks:
 
-### What is shipped
+1. **CPU preparation:** `prepare` reads
+   `/dataset/data/test-00000-of-00001.parquet` from the read-only `fancyzhx/ag_news`
+   mount. It samples **128 rows: 32 each of World, Sports, Business, and Sci/Tech**,
+   with seed **23**, preserving source row IDs, and splits them into
+   **eight 16-row partitions**.
+2. **GPU inference:** each delayed `infer` task is annotated with
+   `resources={"GPU": 1}` and reuses the worker-local engine.
+3. **CPU output:** delayed concatenation and `save_results` tasks combine
+   predictions, write outputs, and calculate metrics.
 
-The script, `pyproject.toml`, and `uv.lock` must be present and not excluded.
-Git selects tracked and eligible untracked files, but the archive uses their
-**current working-tree contents**, not committed `HEAD`. Ignored files and
-recognized secret paths (including `.env*`, private-key files, and `.hfdask`)
-are excluded; symlinks are rejected. Review project contents and ignore rules:
-secret-path filtering is not a general secret scanner.
+Preparation and output tasks use
+`dask.annotate(workers=cpu_workers, allow_other_workers=False)` to restrict them
+to CPU workers. `summary.compute(optimize_graph=False)` preserves the separately
+annotated CPU/GPU boundaries; only the summary returns to the submitting script
+running on the coordinator.
 
-Limits are **512 KiB compressed, 8 MiB uncompressed, and 2,000 files**, including
-`uv.lock`. Keep models, datasets, generated outputs, caches, and credentials out
-of the source bundle; use bucket mounts for data.
+Before submitting the graph, the script registers `WorkerSetup`, a Dask
+`WorkerPlugin` that skips CPU workers and loads `Qwen/Qwen3-0.6B` from `/model`
+once per GPU worker. Registration waits for setup on existing workers; Dask
+also runs setup on workers that join or restart later.
 
-## Execution and recovery limits
+Both revisions are pinned in `inference.yaml`; `job.py` contains only filesystem
+paths and no Hub download logic. Mounts fetch files on demand, rather than
+preloading both repositories on every node:
 
-`job.py` reads `/input/prompts/*.parquet` and applies
-`dataset.map_partitions(infer, meta=...)`. Only GPU machines host Dask workers,
-so graph tasks, including Parquet reads, run there without explicit H200 routing
-or `GPU=1` task annotations. `infer` imports vLLM at module level but constructs
-`LLM` lazily on the first nonempty partition, caching it on the worker. Each
-replica uses `tensor_parallel_size=1`; models are not serialized into tasks.
-Worker restart requires a model reload.
+| Input | Revision |
+|---|---|
+| `fancyzhx/ag_news` | `eb185aade064a813bc0b7f42de02595523103ca4` |
+| `Qwen/Qwen3-0.6B` | `c1899de289a04d12100db370d81485cdf75e47ca` |
 
-`predictions.compute()` gathers **all predictions into CPU coordinator RAM**.
-Only after the entire computation succeeds does the coordinator write
-`/output/results.parquet`. Ensure the full result fits coordinator memory; this
-is not a streaming output pipeline. Always use a fresh output prefix.
+The model uses one GPU (`tensor_parallel_size=1`), a non-thinking chat template,
+temperature 0, and at most 16 output tokens. Workers emit structured Dask events
+on the `inference` topic: `model_loading`, `model_loaded`, and
+`partition_complete` track inference, including loading/inference elapsed time
+and partition row counts. CPU tasks emit `prepared` and `results_saved` with row
+counts. Dask adds worker attribution and timestamps.
+Use `get_client().get_events("inference")` while the cluster is running to inspect
+them; events are bounded scheduler history, not durable HF Job stdout logs.
 
-This script has no per-shard durable writes, readback hashes, output manifests,
-resume, or skip-existing behavior.
-A failure before the final write leaves no completed prediction checkpoint; the
-final write is not an atomic recovery protocol. Retrieve and validate the output
-after success. Job-local disks and scheduler state are ephemeral; automatic
-whole-cluster resume is not implemented.
+The [AG News card](https://huggingface.co/datasets/fancyzhx/ag_news) lists the
+license as **unknown** and describes use for **research purposes**. Public access
+does not establish unrestricted reuse rights; review terms before reuse or
+redistribution, including output article text.
+[Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B) is **Apache-2.0**.
 
-### Job cleanup
+## Outputs
 
-The CLI prints and updates a **public recovery manifest** at
-`.hfdask/run-*.json`; use `--manifest PATH` to choose an unused path. It contains
-Job handles, not private node keys or prediction checkpoints. Successful waiting
-releases and verifies the remaining Jobs; launch failures and interrupts attempt
-to close known Jobs. If the process is lost or cleanup is reported unverified,
-retain the manifest and inspect all recorded Jobs, including partial launches.
-Use `Cluster.from_manifest(...).close()` with HF credentials as shown in
-[Cleanup and recovery](../README.md#cleanup-and-recovery), and reconcile
-ambiguous submissions by cluster labels before retrying. Do not delete the
-manifest until cleanup is verified.
+CPU worker tasks concatenate the small result in memory and write:
 
-An actual four-H200 vLLM run with this CLI and stock image has **not been
-GPU-validated**.
+- `/output/results.parquet`: `id`, `text`, `label`, `prediction`.
+- `/output/summary.json`: `rows`, `invalid_predictions`, and `accuracy`, also
+  collected by the submitting script and printed to coordinator stdout.
 
-References: [vLLM offline batches](https://docs.vllm.ai/en/latest/getting_started/quickstart/#offline-batched-inference)
-and [multiprocessing constraints](https://docs.vllm.ai/en/latest/usage/troubleshooting/#python-multiprocessing).
+Predictions outside the four category strings count as invalid; all rows contribute
+to accuracy. Metrics are descriptive, not pass/fail thresholds. Repository names
+and pinned revisions are recorded in YAML and the HF Job's volume configuration.
+
+There is no resume, skip-existing behavior, or per-partition durable checkpoint.
+Final writes are not an atomic recovery protocol. Job-local caches and scheduler
+state are ephemeral; retries need a fresh seeded output prefix and reload inputs.
+This CPU → GPU → CPU example is intentionally small, not a streaming output pipeline.
+
+## Cost and cleanup
+
+Check HF pricing for `l4x1` and `cpu-basic` before submitting. The configured
+**30-minute timeout is not an assured spending cap**. Storage charges, retries,
+and unverified cleanup can add cost.
+
+The CLI records public Job handles in `.hfdask/run-*.json` (or an unused
+`--manifest PATH`), waits for completion, and verifies cleanup. Failures and
+interrupts attempt to close known Jobs. If the process is lost or cleanup is
+unverified, retain the manifest, inspect every recorded Job, and follow
+[cleanup and recovery](../README.md#cleanup-and-recovery). Reconcile ambiguous
+submissions by cluster labels before retrying. This recovery manifest is not a
+prediction checkpoint; keep it until Job termination is verified.

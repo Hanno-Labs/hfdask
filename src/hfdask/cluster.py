@@ -150,7 +150,7 @@ def submit_cluster(
 
     The caller explicitly supplies keys and permits public n0 discovery/relay
     service use. Custom relays still use n0 discovery with this initial backend.
-    Each image must contain hfdask[p2p] and the workload. No exposed HF ports.
+    Each image must contain hfdask and the workload, or bootstrap them. No exposed HF ports.
     Hardware overrides default independently to spec.flavor. A colocated worker
     shares the scheduler Job's hardware; worker_flavor applies to remote Jobs.
     """
