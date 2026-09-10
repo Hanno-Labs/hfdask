@@ -20,3 +20,9 @@ run = "uv run ruff format --check src tests examples"
 description = "Run the test suite"
 sources = ["src/**/*.py", "tests/**/*.py", "examples/**/*.py", "pyproject.toml", "uv.lock"]
 run = "uv run pytest tests/"
+
+[tasks.docs]
+description = "Generate API documentation with pdoc"
+sources = ["src/**/*.py", "pdoc-templates/*.jinja2", "README.md", "pyproject.toml", "uv.lock"]
+# Explicit modules bypass package __all__ without importing the standalone bootstrap.
+run = "uv run --extra docs pdoc --docformat google -t pdoc-templates -o docs hfdask hfdask.jobs hfdask.cluster hfdask.client hfdask.routing hfdask.config hfdask.cli hfdask.runner hfdask.hardware hfdask.network"

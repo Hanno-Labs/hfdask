@@ -58,10 +58,26 @@ async def _serve(
 def connect(
     manifest: dict[str, Any], identity: Identity, *, timeout: float = 1200
 ) -> Iterator[Any]:
-    """Yield a normal Dask Client. Disconnecting never cancels the HF Jobs.
+    """Connect to a persistent cluster without taking ownership of its HF Jobs.
 
-    One mesh connection per host: fixed loopback ports start at 21000. Keep this
-    context open while using futures. The caller owns explicit cluster shutdown.
+    Args:
+        manifest: Public `hfdask.cluster.Cluster.manifest` from `boot_cluster`.
+        identity: Private client identity supplied at boot, not a Job node identity.
+        timeout: Positive timeout in seconds used for mesh startup, Dask connection,
+            and worker readiness. These phases do not share one total deadline.
+
+    Yields:
+        A synchronous Dask client after the expected worker topology is ready.
+        It is not installed as Dask's default client.
+
+    Raises:
+        ValueError: If the manifest, identity, or timeout fails validation.
+        TimeoutError: If mesh startup or worker readiness exceeds its deadline.
+        RuntimeError: If this process already has a mesh client or cleanup cannot finish.
+
+    One mesh connection per host: fixed loopback ports start at 21000. Keep the
+    context open while using futures. Exiting closes the client and local mesh,
+    never the HF Jobs; explicitly call `hfdask.cluster.Cluster.close` to release them.
     """
     from distributed import Client
 

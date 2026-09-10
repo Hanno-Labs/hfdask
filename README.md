@@ -212,6 +212,33 @@ and can access mounted data. HF credentials stay in the submitting process;
 each node receives its own Iroh key through Job secrets. Keep credentials out
 of the source bundle and grant mounts only the access the workload needs.
 
+## API documentation
+
+Generate the API reference with [pdoc](https://pdoc.dev/):
+
+```sh
+uv sync --extra docs
+mise run docs
+open docs/hfdask.html
+```
+
+The generated `docs/` directory is build output and is intentionally not committed.
+The reference includes the public package and implementation modules, except the
+standalone `hfdask.bootstrap` script, which must not be imported for documentation.
+Start with `hfdask.jobs` for single-Job submission, `hfdask.cluster` for multi-Job
+lifecycle and recovery, `hfdask.client` for persistent connections, and
+`hfdask.routing` for task placement.
+
+The pdoc template hides only Pydantic-generated constructor entries for `JobSpec`,
+`WorkerGroup`, and `Identity` (including re-exports). Their class documentation and
+fields remain visible; this avoids introspecting Pydantic's internal constructor
+annotations without modifying runtime classes or third-party code.
+
+Docstrings follow langset's style: Markdown module overviews and inline code,
+with Google-style `Args:`, `Returns:` (or `Yields:`), and `Raises:` sections when
+those clarify a public contract. Document ownership, costs, failure behavior,
+and constraints rather than repeating type annotations or private implementation.
+
 ## Development
 
 ```sh
@@ -223,7 +250,7 @@ mise run test
 
 Ruff lint and formatting cover `src`, `tests`, and `examples`; ty checks `src`.
 Use `mise run format` to apply Ruff formatting. CI runs the same formatting,
-lint, and test tasks on pull requests and pushes to `main`.
+lint, test, and API documentation build tasks on pull requests and pushes to `main`.
 
 Run the opt-in encrypted transport tests with:
 

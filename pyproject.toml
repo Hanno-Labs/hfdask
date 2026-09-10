@@ -19,6 +19,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+docs = ["pdoc>=15"]
 
 inference = [
     "dask[dataframe]>=2025.1,<2027",
@@ -30,14 +31,14 @@ hfdask = "hfdask.cli:main"
 hfdask-runner = "hfdask.runner:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.11", "ty>=0.0.61", "build>=1.2", "dask[dataframe]>=2025.1,<2027"]
+dev = ["pytest>=8", "ruff>=0.11", "ty>=0.0.61", "build>=1.2", "dask[dataframe]>=2025.1,<2027", "pdoc>=15"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hfdask"]
 
 [tool.hatch.build.targets.sdist]
 include = ["src", "tests", "examples", "README.md", "LICENSE", "pyproject.toml",
-           ".gitignore", "mise.toml", "uv.lock"]
+           ".gitignore", "mise.toml", "uv.lock", "pdoc-templates"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

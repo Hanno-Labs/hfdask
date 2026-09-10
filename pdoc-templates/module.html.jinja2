@@ -1,0 +1,15 @@
+{% extends "default/module.html.jinja2" %}
+
+{% macro is_public(doc) %}
+    {# Pydantic's generated constructors expose internal annotations, not the public
+       dataclass signature. Keep the class docs and fields, including re-exports. #}
+    {% if doc.fullname not in (
+        "hfdask.JobSpec.__init__",
+        "hfdask.WorkerGroup.__init__",
+        "hfdask.jobs.JobSpec.__init__",
+        "hfdask.cluster.WorkerGroup.__init__",
+        "hfdask.cluster.Identity.__init__",
+    ) %}
+        {{ default_is_public(doc) }}
+    {% endif %}
+{% endmacro %}

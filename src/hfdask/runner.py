@@ -40,7 +40,27 @@ def run(
     memory_limit: str = "auto",
     kwargs: dict[str, Any] | None = None,
 ) -> object:
-    """Call module:function(client, **kwargs) and close the cluster on every exit."""
+    """Run a callable on a local, process-based Dask cluster inside one machine.
+
+    Args:
+        entrypoint: Importable `module:function` accepting a Dask client first.
+        workers: Positive number of local worker processes.
+        threads_per_worker: Positive thread count per worker.
+        memory_limit: Dask per-worker limit; `"auto"` selects automatically and `"0"`
+            disables the limit.
+        kwargs: Keyword arguments supplied to the workload after the client.
+
+    Returns:
+        The workload's return value after the client and cluster have closed.
+
+    Raises:
+        ValueError: If runner configuration fails validation.
+        TypeError: If the resolved entrypoint is not callable.
+
+    Import, startup, and workload errors propagate. The context managers close
+    acquired Dask resources on failure as well as success. This function does not
+    submit or cancel HF Jobs.
+    """
     RunConfig(
         entrypoint=entrypoint,
         workers=workers,

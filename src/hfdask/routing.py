@@ -20,7 +20,20 @@ def require_tag_collection(tags: Iterable[str]) -> set[str]:
 
 
 def workers_with(client: Client, *, tags: Iterable[str]) -> list[str]:
-    """Snapshot eligible workers. Refresh after scaling; never falls back silently."""
+    """Snapshot workers whose hfdask metadata contains every requested tag.
+
+    Args:
+        client: Connected Dask client with access to scheduler worker metadata.
+        tags: Required categorical tags, such as `["HAS_GPU"]` or custom group tags.
+            An empty collection matches all currently registered workers.
+
+    Returns:
+        Sorted worker addresses. Refresh the snapshot after workers join or leave.
+
+    Raises:
+        TypeError: If tags is a single string rather than a collection.
+        ValueError: If tags fail validation or no workers match; there is no fallback.
+    """
     required = require_tag_collection(tags)
     inventories = {
         address: worker.get("hfdask", {})
@@ -46,7 +59,25 @@ def submit_on(
     resources: dict[str, float] | None = None,
     **kwargs: object,
 ) -> Future:
-    """Submit with hard categorical affinity plus native numeric reservations."""
+    """Submit with hard categorical affinity plus native numeric reservations.
+
+    Args:
+        client: Connected Dask client.
+        function: Task callable to execute remotely.
+        *args: Positional arguments forwarded to the task through `client.submit`.
+        tags: Required worker tags, resolved by `workers_with` at submission time.
+        resources: Native Dask resource requirements, such as `{"GPU": 1}`.
+            Tags select workers; numeric resources reserve their capacity.
+        **kwargs: Additional `client.submit` options and task keyword arguments.
+            `workers` and `allow_other_workers` are owned by this helper.
+
+    Returns:
+        A Dask future restricted to the matching worker addresses.
+
+    Raises:
+        ValueError: If placement is overridden, tags are invalid, or no workers match.
+        TypeError: If tags is a single string.
+    """
     PlacementConfig(kwargs=kwargs)
     return client.submit(
         function,
