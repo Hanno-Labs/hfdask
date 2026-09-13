@@ -16,7 +16,13 @@ def spec(**kwargs):
 
 
 @pytest.mark.parametrize(
-    "kwargs", [{"workers": 0}, {"threads_per_worker": 0}, {"kwargs": {"bad": float("nan")}}]
+    "kwargs",
+    [
+        {"workers": 0},
+        {"threads_per_worker": 0},
+        {"threads_per_worker": 2},
+        {"kwargs": {"bad": float("nan")}},
+    ],
 )
 def test_invalid_spec(kwargs):
     with pytest.raises(ValueError):

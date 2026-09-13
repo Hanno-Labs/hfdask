@@ -5,7 +5,11 @@ import pytest
 from hfdask.runner import run, run_script
 
 
-def test_real_multiprocess_cluster():
+def test_real_multiprocess_cluster(monkeypatch):
+    monkeypatch.setattr(
+        "hfdask.hardware.detect",
+        lambda: {"cpu_threads": 3, "ram_bytes": 2**30, "gpus": []},
+    )
     assert run("tests.workloads:calculate", workers=2, memory_limit="0", kwargs={"count": 5}) == [
         0,
         1,
@@ -20,12 +24,27 @@ def test_cleanup_on_failure(monkeypatch):
     client = MagicMock()
     monkeypatch.setattr("hfdask.runner.LocalCluster", cluster)
     monkeypatch.setattr("hfdask.runner.Client", client)
+    monkeypatch.setattr(
+        "hfdask.hardware.detect",
+        lambda: {"cpu_threads": 5, "ram_bytes": 2**30, "gpus": []},
+    )
     with pytest.raises(RuntimeError, match="intentional"):
         run("tests.workloads:fail")
     cluster.return_value.__exit__.assert_called_once()
     client.return_value.__exit__.assert_called_once()
     assert cluster.call_args.kwargs["host"] == "127.0.0.1"
     assert cluster.call_args.kwargs["dashboard_address"] is None
+    assert cluster.call_args.kwargs["n_workers"] == 4
+    assert cluster.call_args.kwargs["threads_per_worker"] == 1
+
+
+def test_single_job_requires_one_scheduler_and_one_worker_core(monkeypatch):
+    monkeypatch.setattr(
+        "hfdask.hardware.detect",
+        lambda: {"cpu_threads": 1, "ram_bytes": 2**30, "gpus": []},
+    )
+    with pytest.raises(RuntimeError, match="at least two"):
+        run("tests.workloads:calculate")
 
 
 def test_script_uses_default_distributed_client(tmp_path):

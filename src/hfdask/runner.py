@@ -44,8 +44,9 @@ def run(
 
     Args:
         entrypoint: Importable `module:function` accepting a Dask client first.
-        workers: Positive number of local worker processes.
-        threads_per_worker: Positive thread count per worker.
+        workers: Worker-machine topology hint used by clustered launches; a
+            single-machine run always detects its local worker count.
+        threads_per_worker: Must be `1`; every available worker core gets its own process.
         memory_limit: Dask per-worker limit; `"auto"` selects automatically and `"0"`
             disables the limit.
         kwargs: Keyword arguments supplied to the workload after the client.
@@ -56,6 +57,8 @@ def run(
     Raises:
         ValueError: If runner configuration fails validation.
         TypeError: If the resolved entrypoint is not callable.
+        RuntimeError: If fewer than two CPU cores are available for a colocated
+            scheduler and worker.
 
     Import, startup, and workload errors propagate. The context managers close
     acquired Dask resources on failure as well as success. This function does not
@@ -67,12 +70,21 @@ def run(
         threads_per_worker=threads_per_worker,
         memory_limit=memory_limit,
     )
+    from .hardware import available_cpu_cores, detect
+
+    cores = available_cpu_cores(detect())
+    local_workers = cores - 1
+    if local_workers < 1:
+        raise RuntimeError("A single-Job cluster needs at least two available CPU cores")
     function = require_callable_entrypoint(entrypoint)
-    print(json.dumps({"phase": "cluster_start", "workers": workers}), flush=True)
+    print(
+        json.dumps({"phase": "cluster_start", "cpu_cores": cores, "workers": local_workers}),
+        flush=True,
+    )
     with (
         LocalCluster(
-            n_workers=workers,
-            threads_per_worker=threads_per_worker,
+            n_workers=local_workers,
+            threads_per_worker=1,
             processes=True,
             host="127.0.0.1",
             dashboard_address=None,
@@ -81,8 +93,8 @@ def run(
         ) as cluster,
         Client(cluster, set_as_default=False) as client,
     ):
-        client.wait_for_workers(workers, timeout=120)
-        print(json.dumps({"phase": "cluster_ready", "workers": workers}), flush=True)
+        client.wait_for_workers(local_workers, timeout=120)
+        print(json.dumps({"phase": "cluster_ready", "workers": local_workers}), flush=True)
         result = function(client, **(kwargs or {}))
     print(json.dumps({"phase": "workload_complete"}), flush=True)
     return result
@@ -118,7 +130,7 @@ def main() -> None:
     parser.add_argument(
         "--scheduler-worker",
         action="store_true",
-        help="Run one of the total workers in the scheduler Job",
+        help="Run per-core workers after reserving one core for the scheduler",
     )
     args = parser.parse_args()
     kwargs = json.loads(args.kwargs)
@@ -138,9 +150,8 @@ def main() -> None:
 
 async def run_mesh(args: argparse.Namespace, kwargs: dict[str, Any]) -> None:
     import iroh
-    from distributed import Scheduler, Worker
 
-    from .network import ALPN, Mesh
+    from .network import ALPN
 
     RunConfig(
         entrypoint=args.entrypoint,
@@ -169,60 +180,18 @@ async def run_mesh(args: argparse.Namespace, kwargs: dict[str, Any]) -> None:
             iroh.EndpointAddr(iroh.EndpointId.from_bytes(bytes.fromhex(peer)), None, [])
             for peer in config["peers"]
         ]
-        if config.get("hardware_detection"):
-            await run_detected(args, config, endpoint, peers, kwargs)
-            return
-        services = list(range(len(peers))) + ([0] if args.scheduler_worker else [])
-        async with Mesh(endpoint, peers, args.node, services=services):
-            print(json.dumps({"phase": "mesh_ready", "node": args.node}), flush=True)
-            if args.node:
-                async with Worker(
-                    "tcp://127.0.0.1:21000",
-                    host="127.0.0.1",
-                    port=21000 + args.node,
-                    nthreads=args.threads_per_worker,
-                    memory_limit=args.memory_limit,
-                    dashboard_address=None,
-                    death_timeout=config["startup_timeout"],
-                ) as worker:
-                    await worker.finished()
-            else:
-                async with AsyncExitStack() as stack:
-                    scheduler = await stack.enter_async_context(
-                        Scheduler(host="127.0.0.1", port=21000, dashboard_address=None)
-                    )
-                    if args.scheduler_worker:
-                        await stack.enter_async_context(
-                            Worker(
-                                scheduler.address,
-                                host="127.0.0.1",
-                                port=21000 + len(peers),
-                                nthreads=args.threads_per_worker,
-                                memory_limit=args.memory_limit,
-                                dashboard_address=None,
-                            )
-                        )
-
-                    def workload() -> None:
-                        with Client(scheduler.address, set_as_default=False) as client:
-                            client.wait_for_workers(args.workers, timeout=config["startup_timeout"])
-                            require_callable_entrypoint(args.entrypoint)(client, **kwargs)
-                            # Ask workers to close; HF timeouts bound survivors on disconnect.
-                            client.retire_workers(close_workers=True)
-
-                    await asyncio.to_thread(workload)
-                    print(json.dumps({"phase": "workload_complete"}), flush=True)
+        await run_detected(args, config, endpoint, peers, kwargs)
     finally:
         await endpoint.close()
 
 
-def wait_topology(client: Client, nodes: set[int], timeout: float) -> None:
+def wait_topology(client: Client, workers_per_node: tuple[int, ...], timeout: float) -> None:
     deadline = time.monotonic() + timeout
+    expected = dict(enumerate(workers_per_node))
     while True:
         infos = [worker.get("hfdask", {}) for worker in client.scheduler_info()["workers"].values()]
-        counts = {node: sum(info.get("node") == node for info in infos) for node in nodes}
-        expected = {info["node"]: info["workers_on_node"] for info in infos if "node" in info}
-        if nodes == set(expected) and all(counts[node] == expected[node] for node in nodes):
+        counts = {node: sum(info.get("node") == node for info in infos) for node in expected}
+        if counts == expected:
             return
         if time.monotonic() >= deadline:
             raise TimeoutError(
@@ -248,18 +217,36 @@ async def run_detected(
         worker_profiles,
         worker_service,
     )
-    from .network import Mesh
+    from .network import Mesh, exchange_worker_counts
 
     nodes = config.get("job_nodes", len(peers))
-    worker_nodes = set(range(1, nodes)) | ({0} if args.scheduler_worker else set())
     profiles = (
         worker_profiles(
-            detect(), config["node_flavors"][args.node], args.threads_per_worker, args.memory_limit
+            detect(),
+            config["node_flavors"][args.node],
+            args.memory_limit,
+            reserve_scheduler_core=args.node == 0 and args.scheduler_worker,
         )
-        if args.node in worker_nodes
+        if args.node or args.scheduler_worker
         else []
     )
-    async with Mesh(endpoint, peers, args.node, services=service_owners(nodes)):  # noqa: SIM117
+    workers_per_node = await exchange_worker_counts(
+        endpoint,
+        peers,
+        args.node,
+        len(profiles),
+        nodes,
+        config["startup_timeout"],
+    )
+    connection_limit = max(256, 4 * sum(workers_per_node))
+    async with Mesh(  # noqa: SIM117
+        endpoint,
+        peers,
+        args.node,
+        services=service_owners(workers_per_node),
+        workers_per_node=workers_per_node,
+        max_connections=connection_limit,
+    ):
         async with AsyncExitStack() as stack:
             if args.node == 0:
                 scheduler = await stack.enter_async_context(
@@ -275,8 +262,8 @@ async def run_detected(
                     Nanny(
                         "tcp://127.0.0.1:21000",
                         host="127.0.0.1",
-                        worker_port=21000 + worker_service(nodes, args.node, ordinal),
-                        port=21000 + nanny_service(nodes, args.node, ordinal),
+                        worker_port=21000 + worker_service(workers_per_node, args.node, ordinal),
+                        port=21000 + nanny_service(workers_per_node, args.node, ordinal),
                         name=f"node-{args.node}-worker-{ordinal}",
                         nthreads=profile["nthreads"],
                         memory_limit=profile["memory_limit"],
@@ -304,7 +291,7 @@ async def run_detected(
 
                 def workload() -> None:
                     with Client("tcp://127.0.0.1:21000", set_as_default=False) as client:
-                        wait_topology(client, worker_nodes, config["startup_timeout"])
+                        wait_topology(client, workers_per_node, config["startup_timeout"])
                         require_callable_entrypoint(args.entrypoint)(client, **kwargs)
                         client.retire_workers(close_workers=True)
 

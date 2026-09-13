@@ -113,11 +113,15 @@ This example pins the model and dataset commits in YAML, mounting them at
 filesystem paths. Use a fresh, seeded writable output prefix for every run and
 verify ownership/privacy.
 
-Worker machines detect hardware at startup. CPU machines run one worker;
-NVIDIA machines run one worker per visible GPU, each with its own
-`CUDA_VISIBLE_DEVICES` assignment. NVIDIA detection requires `nvidia-smi`;
-MIG partitions are unsupported. Clusters support up to 64 Jobs and 16 GPU
-workers per machine.
+Worker machines detect their affinity and cgroup CPU budget at startup and run
+one single-threaded Dask worker process per complete available CPU core. A
+coordinator with `worker: true` reserves exactly one core for the scheduler and
+uses the rest for workers; a one-core coordinator contributes no worker. Remote
+worker-only machines use every detected core. Visible NVIDIA GPUs are assigned
+exclusively to the first worker processes, one GPU per process, while remaining
+processes are CPU-only. NVIDIA detection requires `nvidia-smi`; MIG partitions
+are unsupported. Clusters support up to 64 Jobs. Detected worker counts are
+exchanged before the encrypted mesh allocates its Dask service ports.
 
 ## Source shipping
 
@@ -174,9 +178,10 @@ the separately annotated stage boundaries.
 
 On a CPU worker, `prepare` reads the mounted test Parquet, samples 128 rows
 (32 per category, seed 23), and splits them into eight 16-row partitions.
-`WorkerSetup` skips CPU workers and loads the Qwen3-0.6B engine from `/model`
-once per GPU worker, including workers that join or restart later. The same
-graph supports multiple GPU workers, with one worker per visible GPU.
+`WorkerSetup` skips CPU-only workers and loads the Qwen3-0.6B engine from `/model`
+once per GPU-assigned worker, including workers that join or restart later. The
+same graph supports multiple GPUs, with one exclusively assigned worker per
+visible GPU and additional CPU-only workers for the machine's remaining cores.
 Both Hub revisions are pinned in [`examples/inference.yaml`](examples/inference.yaml),
 not in workload code.
 

@@ -112,6 +112,11 @@ def test_job_counts_are_strict(field, value):
         JobSpec("example", "image", **{field: value})
 
 
+def test_worker_threads_are_fixed_at_one():
+    with pytest.raises(ValidationError):
+        JobSpec("example", "image", threads_per_worker=2)
+
+
 def test_dataclass_api_and_volume_compatibility():
     volume = Volume(type="bucket", source="example/data", mount_path="/data")
     spec = JobSpec("example", "image", "workload:run", volumes=[volume], bootstrap=("uv",))
@@ -327,19 +332,19 @@ def test_focused_mesh_invariants(options, message):
 @pytest.mark.parametrize(
     "options",
     [
-        {"nodes": True},
-        {"nodes": 0},
+        {"workers_per_node": ()},
+        {"workers_per_node": (True, 2)},
         {"node": True},
         {"node": -1},
         {"node": 2},
         {"ordinal": True},
         {"ordinal": -1},
-        {"ordinal": 16},
+        {"ordinal": 2},
     ],
 )
 def test_strict_service_indices(options):
     with pytest.raises(ValidationError):
-        ServiceConfig(**{"nodes": 2, "node": 0, "ordinal": 0, **options})
+        ServiceConfig(**{"workers_per_node": (2, 2), "node": 0, "ordinal": 0, **options})
 
 
 def test_launch_limit_precedes_topology_expansion(monkeypatch):
@@ -449,19 +454,17 @@ def test_invalid_runner_mesh_never_binds_endpoint(monkeypatch):
     bind.assert_not_called()
 
 
-def test_runner_mesh_accepts_legacy_and_persistent_metadata():
-    legacy = RunnerMeshConfig.model_validate(
-        {
-            "node": 0,
-            "peers": ["scheduler", "worker"],
-            "public_relays": True,
-            "relays": [],
-            "startup_timeout": 1200,
-        }
-    )
-    assert legacy.nodes == 2
-    assert "job_nodes" not in legacy.model_dump(exclude_unset=True)
-    assert "node" not in legacy.model_dump()
+def test_runner_mesh_requires_detected_topology_and_accepts_persistent_metadata():
+    with pytest.raises(ValidationError, match="hardware flavor"):
+        RunnerMeshConfig.model_validate(
+            {
+                "node": 0,
+                "peers": ["scheduler", "worker"],
+                "public_relays": True,
+                "relays": [],
+                "startup_timeout": 1200,
+            }
+        )
     persistent = RunnerMeshConfig.model_validate(
         connection(
             node=0, startup_timeout=1200, hardware_detection=True, node_flavors=["cpu-basic"]

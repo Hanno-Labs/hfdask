@@ -12,8 +12,10 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validat
 CONFIG = ConfigDict(strict=True, extra="forbid", validate_default=True, hide_input_in_errors=True)
 Text = Annotated[str, Field(pattern=r"\S")]
 PositiveCount = Annotated[int, Field(strict=True, ge=1)]
+NonnegativeCount = Annotated[int, Field(strict=True, ge=0)]
+OneThread = Annotated[int, Field(strict=True, ge=1, le=1)]
 NodeIndex = Annotated[int, Field(strict=True, ge=0)]
-WorkerOrdinal = Annotated[int, Field(strict=True, ge=0, lt=16)]
+WorkerOrdinal = Annotated[int, Field(strict=True, ge=0)]
 Duration = Annotated[str, Field(pattern=r"^[1-9][0-9]*[smhd]$")]
 RelayURL = Annotated[str, Field(pattern=r"^https://")]
 ExtraName = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")]
@@ -109,19 +111,29 @@ class ConfigModel(BaseModel):
 
 
 class WorkerConfig(ConfigModel):
-    threads: PositiveCount
+    threads: OneThread = 1
     memory_limit: MemoryLimit = "auto"
 
 
+class WorkerTopologyConfig(ConfigModel):
+    workers_per_node: tuple[NonnegativeCount, ...] = Field(min_length=1)
+
+
 class ServiceConfig(ConfigModel):
-    nodes: PositiveCount
+    workers_per_node: tuple[NonnegativeCount, ...] = Field(min_length=1)
     node: NodeIndex
     ordinal: WorkerOrdinal
 
     @model_validator(mode="after")
     def require_node_in_roster(self) -> Self:
-        if self.node >= self.nodes:
+        if self.node >= len(self.workers_per_node):
             raise ValueError("Invalid worker service: node is outside roster")
+        return self
+
+    @model_validator(mode="after")
+    def require_worker_on_node(self) -> Self:
+        if self.ordinal >= self.workers_per_node[self.node]:
+            raise ValueError("Invalid worker service: ordinal is outside node capacity")
         return self
 
 
@@ -171,7 +183,7 @@ class PackagePlan(PackageConfig):
 class RunConfig(ConfigModel):
     entrypoint: Entrypoint
     workers: PositiveCount = 2
-    threads_per_worker: PositiveCount = 1
+    threads_per_worker: OneThread = 1
     memory_limit: DaskMemoryLimit = "auto"
 
 
@@ -234,7 +246,7 @@ class RunnerMeshConfig(RelayConfig):
     node: NodeIndex = Field(exclude=True)
     peers: DistinctPublicIds = Field(min_length=1)
     startup_timeout: PositiveCount
-    hardware_detection: bool = False
+    hardware_detection: Annotated[bool, Field(strict=True)] = True
     node_flavors: list[Text] = Field(default_factory=list)
     node_tags: list[list[str]] = Field(default_factory=list)
     job_nodes: Annotated[int, Field(ge=1, le=64)] | None = None
@@ -258,8 +270,14 @@ class RunnerMeshConfig(RelayConfig):
 
     @model_validator(mode="after")
     def require_hardware_flavor_per_job(self) -> Self:
-        if self.hardware_detection and len(self.node_flavors) != self.nodes:
+        if len(self.node_flavors) != self.nodes:
             raise ValueError("Provide one hardware flavor per Job")
+        return self
+
+    @model_validator(mode="after")
+    def require_detected_worker_topology(self) -> Self:
+        if not self.hardware_detection:
+            raise ValueError("Mesh clusters require hardware detection")
         return self
 
     @model_validator(mode="after")
@@ -272,8 +290,6 @@ class RunnerMeshConfig(RelayConfig):
     def require_persistent_connection_metadata(self) -> Self:
         if self.persistent:
             ConnectionConfig.model_validate(self.model_dump(by_alias=True))
-            if not self.hardware_detection:
-                raise ValueError("Persistent clusters require hardware detection")
         return self
 
 

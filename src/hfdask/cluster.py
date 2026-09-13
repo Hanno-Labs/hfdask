@@ -40,7 +40,8 @@ class WorkerGroup:
 
     Args:
         flavor: HF hardware flavor for every machine in this group.
-        count: Positive machine count. Each GPU machine may start multiple Dask workers.
+        count: Positive machine count. Each machine starts one Dask worker process
+            per complete available CPU core.
         tags: Custom categorical tags added to each worker's metadata. Tags must be
             nonempty and cannot start with `GPU_`, `FLAVOR_`, or `HAS_GPU`, which are
             reserved for hardware detection.
