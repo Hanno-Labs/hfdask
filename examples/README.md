@@ -2,11 +2,12 @@
 
 [`job.py`](job.py) is an ordinary `dask.delayed` script using
 [`inference.yaml`](inference.yaml). By default, two Jobs run the pipeline:
-one `cpu-basic` Job hosts the scheduler, script, and CPU worker; one `l4x1` Job
-hosts one GPU worker. `coordinator.worker: true` enables the CPU worker inside
-the scheduler Job without adding another Job; the setting defaults to `false`.
-This is offline vLLM inference, not a serving process or a model spread across
-GPUs. Multiple GPU workers are supported, with one worker per visible GPU.
+one `cpu-basic` Job hosts the scheduler, script, and its per-core CPU workers;
+one `l4x1` Job hosts one GPU-assigned worker plus CPU-only workers for its
+remaining cores. `coordinator.worker: true` enables workers inside the scheduler
+Job without adding another Job; one core is reserved for the scheduler and the
+rest each get one single-threaded worker. The setting defaults to `false`. This
+is offline vLLM inference, not a serving process or a model spread across GPUs.
 
 ## Configure and run
 

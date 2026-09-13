@@ -14,9 +14,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from distributed import Worker
 
-from .config import ServiceConfig, WorkerConfig
+from .config import ServiceConfig, WorkerConfig, WorkerTopologyConfig
 
-MAX_WORKERS_PER_NODE = 16
 GIB = 1024**3
 
 
@@ -114,30 +113,39 @@ def detect() -> dict[str, Any]:
     return {"cpu_threads": cpus, "ram_bytes": memory, "gpus": gpu_inventory()}
 
 
-def require_supported_gpu_count(gpus: list[dict[str, Any]]) -> None:
-    if len(gpus) > MAX_WORKERS_PER_NODE:
-        raise ValueError("At most 16 GPU workers per Job are supported")
+def available_cpu_cores(inventory: dict[str, Any]) -> int:
+    """Return the number of complete CPU cores available to this process."""
+    return math.floor(float(inventory["cpu_threads"]))
 
 
 def worker_profiles(
-    inventory: dict[str, Any], flavor: str, threads: int, memory_limit: str = "auto"
+    inventory: dict[str, Any],
+    flavor: str,
+    memory_limit: str = "auto",
+    *,
+    reserve_scheduler_core: bool = False,
 ) -> list[dict[str, Any]]:
     from dask.utils import parse_bytes
 
-    WorkerConfig(threads=threads, memory_limit=memory_limit)
+    WorkerConfig(memory_limit=memory_limit)
     gpus = inventory["gpus"]
-    require_supported_gpu_count(gpus)
-    count = max(1, len(gpus))
+    available = available_cpu_cores(inventory)
+    if available < 1:
+        raise RuntimeError("No complete CPU core is available for a Dask worker")
+    count = available - int(reserve_scheduler_core)
+    if count == 0:
+        return []
+    if len(gpus) > count:
+        raise ValueError("Visible GPUs exceed the CPU cores available for one worker each")
     ram = int(inventory["ram_bytes"] * 0.8 / count)
     if memory_limit != "auto":
         requested = int(parse_bytes(memory_limit))
         ram = min(ram, requested)
-    cpu = min(float(threads), inventory["cpu_threads"] / count)
     profiles = []
     for index in range(count):
-        gpu = gpus[index] if gpus else None
+        gpu = gpus[index] if index < len(gpus) else None
         resources = {
-            "CPU_THREADS": cpu,
+            "CPU_THREADS": 1.0,
             "RAM_GIB": ram / GIB,
             "GPU": float(gpu is not None),
             "GPU_VRAM_GIB": gpu["vram_bytes"] * 0.9 / GIB if gpu else 0.0,
@@ -158,27 +166,25 @@ def worker_profiles(
                 "gpu": gpu,
                 "node_inventory": inventory,
                 "memory_limit": ram,
-                "nthreads": max(1, math.ceil(cpu)),
+                "nthreads": 1,
             }
         )
     return profiles
 
 
-def service_owners(nodes: int) -> list[int]:
-    # Preserve primary remote worker ports, with reserved slots for additional GPUs.
-    return list(range(nodes)) + [
-        node for node in range(nodes) for _ in range(MAX_WORKERS_PER_NODE * 2)
-    ]
+def service_owners(workers_per_node: tuple[int, ...]) -> list[int]:
+    """Map the scheduler plus each detected worker/nanny pair to its owning node."""
+    counts = WorkerTopologyConfig(workers_per_node=workers_per_node).workers_per_node
+    return [0, *(node for node, count in enumerate(counts) for _ in range(count * 2))]
 
 
-def worker_service(nodes: int, node: int, ordinal: int) -> int:
-    ServiceConfig(nodes=nodes, node=node, ordinal=ordinal)
-    return node if node and ordinal == 0 else nodes + node * MAX_WORKERS_PER_NODE * 2 + ordinal * 2
+def worker_service(workers_per_node: tuple[int, ...], node: int, ordinal: int) -> int:
+    config = ServiceConfig(workers_per_node=workers_per_node, node=node, ordinal=ordinal)
+    return 1 + 2 * sum(config.workers_per_node[:node]) + ordinal * 2
 
 
-def nanny_service(nodes: int, node: int, ordinal: int) -> int:
-    ServiceConfig(nodes=nodes, node=node, ordinal=ordinal)
-    return nodes + node * MAX_WORKERS_PER_NODE * 2 + ordinal * 2 + 1
+def nanny_service(workers_per_node: tuple[int, ...], node: int, ordinal: int) -> int:
+    return worker_service(workers_per_node, node, ordinal) + 1
 
 
 def worker_metadata(worker: Worker, *, profile: dict[str, Any]) -> dict[str, Any]:

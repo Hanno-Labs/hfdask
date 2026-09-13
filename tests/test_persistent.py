@@ -58,7 +58,7 @@ def test_client_connect_disconnect_keeps_scheduler(monkeypatch):
     from hfdask.client import connect
 
     async def transport(config, identity, ready, stop, timeout):
-        ready.set_result(None)
+        ready.set_result((1,))
         while not stop.is_set():
             await asyncio.sleep(0.01)
 
@@ -147,7 +147,16 @@ def persistent_server():
         memory_limit="256MiB",
         entrypoint="missing:must_not_run",
     )
-    with patch("hfdask.network.Mesh", NoMesh):
+
+    async def topology(*args, **kwargs):
+        return (1,)
+
+    inventory = {"cpu_threads": 2, "ram_bytes": 512 * 1024**2, "gpus": []}
+    with (
+        patch("hfdask.network.Mesh", NoMesh),
+        patch("hfdask.network.exchange_worker_counts", topology),
+        patch("hfdask.hardware.detect", return_value=inventory),
+    ):
         asyncio.run(run_detected(args, config, None, [None, None], {}))
 
 
@@ -163,7 +172,7 @@ def test_persistent_runner_survives_separate_clients():
 from distributed import Client
 from hfdask.runner import wait_topology
 with Client('tcp://127.0.0.1:21000', timeout=20) as client:
-    wait_topology(client, {0}, 20)
+    wait_topology(client, (1,), 20)
     assert client.submit(abs, -29).result() == 29
 """
     try:
@@ -212,7 +221,14 @@ def encrypted_server(ready):
             iroh.EndpointAddr(iroh.SecretKey.from_bytes(b"b" * 32).public(), None, []),
         ]
         try:
-            async with Mesh(endpoint, peers, 0, services=[0, 0], bind_host="127.0.0.2"):  # noqa: SIM117
+            async with Mesh(  # noqa: SIM117
+                endpoint,
+                peers,
+                0,
+                services=[0, 0, 0],
+                workers_per_node=(1,),
+                bind_host="127.0.0.2",
+            ):
                 async with Scheduler(
                     host="127.0.0.2", port=21000, dashboard_address=None
                 ) as scheduler:

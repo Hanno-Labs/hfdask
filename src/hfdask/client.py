@@ -18,14 +18,14 @@ _connection_lock = threading.Lock()
 async def _serve(
     config: ConnectionConfig,
     identity: Identity,
-    ready: concurrent.futures.Future[None],
+    ready: concurrent.futures.Future[tuple[int, ...]],
     stop: threading.Event,
     timeout: float,
 ) -> None:
     import iroh
 
     from .hardware import service_owners
-    from .network import ALPN, Mesh
+    from .network import ALPN, Mesh, fetch_worker_counts
 
     # FFI annotates BaseEventLoop but uses the standard AbstractEventLoop interface.
     iroh.iroh_ffi.uniffi_set_event_loop(asyncio.get_running_loop())  # ty: ignore[invalid-argument-type]
@@ -46,8 +46,18 @@ async def _serve(
             for peer in config.peers
         ]
         nodes = config.job_nodes
-        async with Mesh(endpoint, peers, nodes, services=service_owners(nodes)):
-            ready.set_result(None)
+        workers_per_node = await fetch_worker_counts(endpoint, peers[0], timeout)
+        if len(workers_per_node) != nodes:
+            raise ConnectionError("Live worker topology does not match the manifest")
+        async with Mesh(
+            endpoint,
+            peers,
+            nodes,
+            services=service_owners(workers_per_node),
+            workers_per_node=workers_per_node,
+            max_connections=max(256, 4 * sum(workers_per_node)),
+        ):
+            ready.set_result(workers_per_node)
             while not stop.is_set():
                 await asyncio.sleep(0.1)
     finally:
@@ -85,11 +95,10 @@ def connect(
 
     connection = ConnectionConfig.model_validate(manifest.get("connection"))
     ConnectConfig(timeout=timeout, connection=connection, public_id=identity.public_id())
-    nodes = connection.job_nodes
 
     if not _connection_lock.acquire(blocking=False):
         raise RuntimeError("A mesh client is already connected in this process")
-    ready: concurrent.futures.Future[None] = concurrent.futures.Future()
+    ready: concurrent.futures.Future[tuple[int, ...]] = concurrent.futures.Future()
     stopped = threading.Event()
     loop = asyncio.new_event_loop()
     task: asyncio.Task[None] | None = None
@@ -110,10 +119,9 @@ def connect(
     thread = threading.Thread(target=serve, name="hfdask-client-mesh", daemon=True)
     try:
         thread.start()
-        ready.result(timeout=timeout + 5)
+        workers_per_node = ready.result(timeout=timeout + 5)
         with Client("tcp://127.0.0.1:21000", timeout=timeout, set_as_default=False) as client:
-            worker_nodes = set(range(1, nodes)) | ({0} if connection.scheduler_worker else set())
-            wait_topology(client, worker_nodes, timeout)
+            wait_topology(client, workers_per_node, timeout)
             yield client
     finally:
         stopped.set()

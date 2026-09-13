@@ -26,45 +26,66 @@ def test_profiles_partition_host_budget():
         {"uuid": f"GPU-{i}", "name": "NVIDIA A100-SXM4-80GB", "vram_bytes": 80 * GIB}
         for i in range(2)
     ]
-    profiles = worker_profiles(
-        {"cpu_threads": 8, "ram_bytes": 100 * GIB, "gpus": gpus}, "a100x2", 8
-    )
-    assert len(profiles) == 2
-    for profile in profiles:
+    profiles = worker_profiles({"cpu_threads": 8, "ram_bytes": 100 * GIB, "gpus": gpus}, "a100x2")
+    assert len(profiles) == 8
+    for profile in profiles[:2]:
         assert profile["resources"] == {
-            "CPU_THREADS": 4,
-            "RAM_GIB": 40,
+            "CPU_THREADS": 1,
+            "RAM_GIB": 10,
             "GPU": 1,
             "GPU_VRAM_GIB": 72,
         }
         assert "GPU_MODEL_A100" in profile["tags"]
         assert "HAS_GPU" not in profile["resources"]
+        assert profile["nthreads"] == 1
+    for profile in profiles[2:]:
+        assert profile["resources"] == {
+            "CPU_THREADS": 1,
+            "RAM_GIB": 10,
+            "GPU": 0,
+            "GPU_VRAM_GIB": 0,
+        }
+        assert profile["gpu"] is None
     assert profiles[0]["gpu"]["uuid"] != profiles[1]["gpu"]["uuid"]
 
 
+def test_scheduler_reserves_exactly_one_core():
+    inventory = {"cpu_threads": 4.75, "ram_bytes": 8 * GIB, "gpus": []}
+    assert len(worker_profiles(inventory, "cpu-basic")) == 4
+    assert len(worker_profiles(inventory, "cpu-basic", reserve_scheduler_core=True)) == 3
+    one_core = {"cpu_threads": 1, "ram_bytes": 8 * GIB, "gpus": []}
+    assert worker_profiles(one_core, "cpu-basic", reserve_scheduler_core=True) == []
+
+
+def test_only_complete_cpu_cores_become_workers():
+    partial_core = {"cpu_threads": 0.75, "ram_bytes": 8 * GIB, "gpus": []}
+    with pytest.raises(RuntimeError, match="No complete CPU core"):
+        worker_profiles(partial_core, "cpu-basic")
+    almost_two = {"cpu_threads": 1.9, "ram_bytes": 8 * GIB, "gpus": []}
+    assert len(worker_profiles(almost_two, "cpu-basic")) == 1
+
+
 def test_cpu_profile_memory_cap():
-    (profile,) = worker_profiles(
-        {"cpu_threads": 2, "ram_bytes": 8 * GIB, "gpus": []}, "cpu-basic", 1, "1 GiB"
+    profiles = worker_profiles(
+        {"cpu_threads": 2, "ram_bytes": 8 * GIB, "gpus": []}, "cpu-basic", "1 GiB"
     )
-    assert profile["resources"]["RAM_GIB"] == 1
-    assert profile["resources"]["CPU_THREADS"] == 1
-    assert profile["resources"]["GPU"] == 0
-    assert profile["tags"] == ["FLAVOR_cpu-basic"]
+    assert len(profiles) == 2
+    for profile in profiles:
+        assert profile["resources"]["RAM_GIB"] == 1
+        assert profile["resources"]["CPU_THREADS"] == 1
+        assert profile["resources"]["GPU"] == 0
+        assert profile["tags"] == ["FLAVOR_cpu-basic"]
 
 
-@pytest.mark.parametrize(
-    "threads,memory", [(True, "auto"), (0, "auto"), (1, "0"), (1, "-1 GiB"), (1, "bad")]
-)
-def test_profile_input_contract(threads, memory):
+@pytest.mark.parametrize("memory", ["0", "-1 GiB", "bad"])
+def test_profile_input_contract(memory):
     with pytest.raises(ValueError):
-        worker_profiles(
-            {"cpu_threads": 2, "ram_bytes": 8 * GIB, "gpus": []}, "cpu-basic", threads, memory
-        )
+        worker_profiles({"cpu_threads": 2, "ram_bytes": 8 * GIB, "gpus": []}, "cpu-basic", memory)
 
 
 def test_profile_gpu_capacity_boundary():
-    with pytest.raises(ValueError, match="At most 16"):
-        worker_profiles({"cpu_threads": 2, "ram_bytes": 8 * GIB, "gpus": [{}] * 17}, "gpu", 1)
+    with pytest.raises(ValueError, match="Visible GPUs exceed"):
+        worker_profiles({"cpu_threads": 2, "ram_bytes": 8 * GIB, "gpus": [{}] * 3}, "gpu")
 
 
 def test_routing_validates_before_scheduler_lookup():
@@ -96,14 +117,21 @@ def test_gpu_visibility(monkeypatch):
 
 
 def test_service_layout():
-    owners = service_owners(6)
+    workers_per_node = (0, 2, 1, 3)
+    owners = service_owners(workers_per_node)
     seen = {0}
-    for node in range(6):
-        for ordinal in range(16):
-            for service in (worker_service(6, node, ordinal), nanny_service(6, node, ordinal)):
+    for node, count in enumerate(workers_per_node):
+        for ordinal in range(count):
+            for service in (
+                worker_service(workers_per_node, node, ordinal),
+                nanny_service(workers_per_node, node, ordinal),
+            ):
                 assert service not in seen
                 assert owners[service] == node
                 seen.add(service)
+    assert seen == set(range(len(owners)))
+    assert worker_service((0, 32), 1, 31) == 63
+    assert nanny_service((0, 32), 1, 31) == 64
 
 
 def test_category_routing():
@@ -122,14 +150,14 @@ def test_category_routing():
         workers_with(client, tags={"unknown"})
 
 
-def test_topology_requires_every_gpu_worker():
+def test_topology_requires_every_detected_worker():
     client = MagicMock()
     info = {"node": 1, "workers_on_node": 2}
     client.scheduler_info.return_value = {"workers": {"first": {"hfdask": info}}}
     with pytest.raises(TimeoutError):
-        wait_topology(client, {1}, 0)
+        wait_topology(client, (0, 2), 0)
     client.scheduler_info.return_value["workers"]["second"] = {"hfdask": info}
-    wait_topology(client, {1}, 0)
+    wait_topology(client, (0, 2), 0)
 
 
 def test_real_nanny_metadata_and_routing():
@@ -158,7 +186,7 @@ def test_real_nanny_metadata_and_routing():
 
             def compute():
                 with Client(scheduler.address, set_as_default=False) as client:
-                    wait_topology(client, {1}, 10)
+                    wait_topology(client, (0, 1), 10)
                     assert (
                         submit_on(
                             client, abs, -7, tags={"FLAVOR_test"}, resources={"CPU_THREADS": 1}

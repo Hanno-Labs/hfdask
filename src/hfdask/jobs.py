@@ -21,6 +21,7 @@ from .config import (
     CONFIG,
     DaskMemoryLimit,
     Duration,
+    OneThread,
     PositiveCount,
     RunConfig,
     Text,
@@ -62,10 +63,10 @@ class JobSpec:
         entrypoint: Importable `module:function` called with a Dask client as its first
             argument. Leave empty only for `hfdask.cluster.boot_cluster`.
         flavor: HF hardware flavor; also the default for multi-Job launch overrides.
-        workers: Local Dask process count for `submit`. For homogeneous mesh launches,
-            worker-machine count, including a colocated scheduler worker if enabled.
-            Explicit worker groups determine remote machine counts instead.
-        threads_per_worker: Positive thread count per Dask worker.
+        workers: Worker-machine count for homogeneous mesh launches, including a
+            colocated scheduler worker if enabled. Single-Job submission detects
+            local CPU cores instead. Explicit worker groups determine remote counts.
+        threads_per_worker: Fixed at `1`; every usable CPU core gets one worker process.
         memory_limit: Dask memory limit, such as `"auto"` or `"1GiB"`. `"0"` disables
             the local limit; hardware-budgeted mesh workers require a positive limit.
         timeout: Remote Job lifetime as a positive integer duration, such as `"1h"`.
@@ -85,7 +86,7 @@ class JobSpec:
     entrypoint: OptionalEntrypoint = ""
     flavor: Text = "cpu-basic"
     workers: PositiveCount = 2
-    threads_per_worker: PositiveCount = 1
+    threads_per_worker: OneThread = 1
     memory_limit: DaskMemoryLimit = "auto"
     timeout: Duration = "1h"
     kwargs: WorkloadKwargs = field(default_factory=dict)
