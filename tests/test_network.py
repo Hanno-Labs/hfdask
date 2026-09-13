@@ -9,6 +9,7 @@ from hfdask.network import (
     authorized,
     bridge,
     encode_worker_counts,
+    exchange_worker_counts,
     read_worker_counts,
 )
 
@@ -65,6 +66,65 @@ def test_scheduler_serves_live_worker_topology(monkeypatch):
             b"K" + encode_worker_counts((0, 2))
         )
         opened.assert_not_called()
+
+    asyncio.run(check())
+
+
+def test_worker_count_exchange_reports_and_receives_full_topology():
+    async def check():
+        stream = MagicMock()
+        stream.recv.return_value.read_exact = AsyncMock(
+            side_effect=[
+                b"K",
+                (2).to_bytes(2, "big"),
+                (0).to_bytes(4, "big"),
+                (3).to_bytes(4, "big"),
+            ]
+        )
+        stream.send.return_value.write_all = AsyncMock()
+        stream.send.return_value.finish = AsyncMock()
+        connection = MagicMock()
+        connection.remote_id.return_value.to_bytes.return_value = b"scheduler"
+        connection.open_bi = AsyncMock(return_value=stream)
+        endpoint = MagicMock()
+        endpoint.connect = AsyncMock(return_value=connection)
+        peers = [peer(b"scheduler"), peer(b"worker")]
+
+        assert await exchange_worker_counts(endpoint, peers, 1, 3, 2, 1) == (0, 3)
+        writes = stream.send.return_value.write_all.await_args_list
+        assert [write.args for write in writes] == [
+            (b"W" + (3).to_bytes(4, "big"),),
+            (b"A",),
+        ]
+        connection.close.assert_called_once_with(0, b"worker topology exchanged")
+
+    asyncio.run(check())
+
+
+def test_scheduler_collects_worker_counts_before_mesh_start():
+    async def check():
+        stream = MagicMock()
+        stream.recv.return_value.read_exact = AsyncMock(
+            side_effect=[b"W", (3).to_bytes(4, "big"), b"A"]
+        )
+        stream.send.return_value.write_all = AsyncMock()
+        stream.send.return_value.finish = AsyncMock()
+        connection = MagicMock()
+        connection.remote_id.return_value.to_bytes.return_value = b"worker"
+        connection.accept_bi = AsyncMock(return_value=stream)
+        pending = MagicMock()
+        pending.connect = AsyncMock(return_value=connection)
+        incoming = MagicMock()
+        incoming.accept = AsyncMock(return_value=pending)
+        endpoint = MagicMock()
+        endpoint.accept_next = AsyncMock(return_value=incoming)
+        peers = [peer(b"scheduler"), peer(b"worker")]
+
+        assert await exchange_worker_counts(endpoint, peers, 0, 0, 2, 1) == (0, 3)
+        stream.send.return_value.write_all.assert_awaited_once_with(
+            b"K" + encode_worker_counts((0, 3))
+        )
+        connection.close.assert_called_once_with(0, b"worker topology exchanged")
 
     asyncio.run(check())
 
