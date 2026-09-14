@@ -222,7 +222,11 @@ class Mesh:
         def finished(done: asyncio.Task[None]) -> None:
             self.tasks.discard(done)
             if not done.cancelled() and (error := done.exception()) is not None:
-                logger.warning("mesh stream failed: %s", type(error).__name__)
+                logger.warning(
+                    "mesh stream failed: %s",
+                    error,
+                    exc_info=(type(error), error, error.__traceback__),
+                )
 
         task.add_done_callback(finished)
 
@@ -282,7 +286,7 @@ class Mesh:
                 await stream.send().write_all(b"D" + index.to_bytes(2, "big"))
                 if await stream.recv().read_exact(1) != b"K":
                     raise ConnectionError("Peer did not open its Dask listener")
-            logger.warning("mesh link authenticated node=%s target=%s", self.index, index)
+            logger.debug("mesh link authenticated node=%s target=%s", self.index, index)
             await bridge(reader, writer, stream)
         finally:
             writer.close()

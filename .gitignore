@@ -1,4 +1,5 @@
 .venv/
+.cache/
 .hfdask/
 __pycache__/
 *.py[cod]

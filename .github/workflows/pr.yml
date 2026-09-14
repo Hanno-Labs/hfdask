@@ -24,3 +24,5 @@ jobs:
         run: mise run test
       - name: Build API documentation
         run: mise run docs
+      - name: Build distributions
+        run: mise run build
