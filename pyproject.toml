@@ -18,20 +18,17 @@ dependencies = [
     "pydantic>=2.12,<3",
 ]
 
-[project.optional-dependencies]
-docs = ["pdoc>=15"]
-dataframe = ["dask[dataframe]>=2025.1,<2027"]
-
-inference = [
-    "dask[dataframe]>=2025.1,<2027",
-    "vllm>=0.10,<1; sys_platform == 'linux' and platform_machine == 'x86_64'",
-]
-
 [project.scripts]
 hfdask = "hfdask.cli:main"
 hfdask-runner = "hfdask.runner:main"
 
 [dependency-groups]
+docs = ["pdoc>=15"]
+deploy = ["dask[dataframe]>=2025.1,<2027"]
+inference = [
+    { include-group = "deploy" },
+    "vllm>=0.10,<1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
 dev = ["pytest>=8", "ruff>=0.11", "ty>=0.0.61", "build>=1.2", "dask[dataframe]>=2025.1,<2027", "pdoc>=15"]
 
 [tool.hatch.build.targets.wheel]

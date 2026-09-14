@@ -51,12 +51,12 @@ def yaml_config(**overrides):
         (yaml_config(workers=None), ("workers",)),
         (yaml_config(mounts={}), ("mounts",)),
         (
-            yaml_config(environment={"image": "image", "extras": "inference"}),
-            ("environment", "extras"),
+            yaml_config(environment={"image": "image", "groups": "deploy"}),
+            ("environment", "groups"),
         ),
         (
-            yaml_config(environment={"image": "image", "extras": ["--bad"]}),
-            ("environment", "extras", 0),
+            yaml_config(environment={"image": "image", "groups": ["--bad"]}),
+            ("environment", "groups", 0),
         ),
     ],
 )
@@ -90,8 +90,8 @@ def test_missing_consent_and_independent_defaults():
     assert first.workers.flavor == first.coordinator.flavor == "cpu-basic"
     assert first.coordinator.worker is False
     assert first.timeout_seconds == 3600
-    first.environment.extras.append("inference")
-    assert second.environment.extras == []
+    first.environment.groups.append("deploy")
+    assert second.environment.groups == []
 
 
 @pytest.mark.parametrize("value", ["0h", "-1h", "1.5h", "1", "1h\n", " 1h", 3600, True])

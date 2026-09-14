@@ -105,9 +105,9 @@ def require_upload_budget(payload: bytes) -> bytes:
     return payload
 
 
-def package_project(root: Path, script: str, extras: list[str]) -> bytes:
+def package_project(root: Path, script: str, groups: list[str]) -> bytes:
     """Snapshot working-tree files, not HEAD; never follow project symlinks."""
-    inputs = PackageConfig(script=script, extras=extras)
+    inputs = PackageConfig(script=script, groups=groups)
     script = inputs.script
     try:
         selected = subprocess.run(
@@ -141,8 +141,15 @@ def package_project(root: Path, script: str, extras: list[str]) -> bytes:
         files[name] = candidate.read_bytes()
         modes[name] = 0o755 if metadata.st_mode & 0o111 else 0o644
     require_project_inputs(files, script)
-    project = tomllib.loads(files["pyproject.toml"].decode()).get("project", {})
-    PackagePlan(script=script, extras=inputs.extras, project=ProjectConfig.model_validate(project))
+    metadata = tomllib.loads(files["pyproject.toml"].decode())
+    PackagePlan.model_validate(
+        {
+            "script": script,
+            "groups": inputs.groups,
+            "project": ProjectConfig.model_validate(metadata.get("project", {})),
+            "dependency-groups": metadata.get("dependency-groups", {}),
+        }
+    )
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
         for name, data in files.items():
@@ -161,9 +168,9 @@ def require_private_source_bucket(api: HfApi, bucket_id: str) -> None:
         )
 
 
-def prepare_spec(spec: JobSpec, root: Path, script: str, extras: list[str], api: HfApi) -> JobSpec:
+def prepare_spec(spec: JobSpec, root: Path, script: str, groups: list[str], api: HfApi) -> JobSpec:
     """Validate and stage source once; retained artifacts incur storage until deleted."""
-    payload = package_project(root, script, extras)
+    payload = package_project(root, script, groups)
     bucket_id = f"{spec.namespace}/jobs-artifacts"
     folder = f"hfdask-source/{uuid4()}"
     remote_path = f"{folder}/project.tar.gz"
@@ -187,7 +194,7 @@ def prepare_spec(spec: JobSpec, root: Path, script: str, extras: list[str], api:
         bootstrap=(
             "python3",
             "/tmp/hfdask-source/bootstrap.py",
-            json.dumps(extras),
+            json.dumps(groups),
             hashlib.sha256(payload).hexdigest(),
         ),
         volumes=[
@@ -251,7 +258,7 @@ def load_cluster(
         "scheduler_worker": scheduler_worker,
         "scheduler_flavor": config.coordinator.flavor,
     }
-    return spec, options, config.timeout_seconds, config.environment.extras
+    return spec, options, config.timeout_seconds, config.environment.groups
 
 
 def save_manifest(path: Path, cluster: Cluster) -> None:
@@ -289,7 +296,7 @@ def main(argv: list[str] | None = None) -> int:
         else Path(".hfdask") / f"run-{secrets.token_hex(8)}.json"
     )
     try:
-        spec, options, timeout, extras = load_cluster(args.cluster, Path.cwd(), args.script)
+        spec, options, timeout, groups = load_cluster(args.cluster, Path.cwd(), args.script)
         nodes = spec.workers + 1 - int(options["scheduler_worker"])
         identities = [Identity(secrets.token_bytes(32)) for _ in range(nodes)]
         # Validate transport identities before reserving the manifest or submitting.
@@ -301,7 +308,7 @@ def main(argv: list[str] | None = None) -> int:
             output.write("{}\n")
         print(f"Recovery manifest: {manifest}", file=sys.stderr)
         api = HfApi()
-        spec = prepare_spec(spec, Path.cwd(), args.script, extras, api)
+        spec = prepare_spec(spec, Path.cwd(), args.script, groups, api)
         try:
             cluster = submit_cluster(
                 spec, identities, api=api, **options, on_submitted=partial(save_manifest, manifest)

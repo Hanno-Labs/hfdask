@@ -44,17 +44,17 @@ optional CPU workers               optional exclusive GPU assignments
 
 ## CPU-only quickstart
 
-Create a Git-backed uv project and add hfdask as a locked project dependency. The
-remote Jobs use this same lockfile, so installing only an isolated CLI with `uvx` is
-not sufficient.
+Create a Git-backed uv project. Add the libraries used by the Dask program as
+normal project dependencies, then add hfdask to the deployment dependency group
+selected by the cluster YAML.
 
 ```sh
 mkdir hfdask-quickstart
 cd hfdask-quickstart
 git init
 uv init --bare
-uv add hfdask
-uv add --optional dataframe "dask[dataframe]>=2025.1,<2027"
+uv add "dask[dataframe,distributed]>=2025.1,<2027" pandas
+uv add --group deploy hfdask
 curl -L https://raw.githubusercontent.com/Hanno-Labs/hfdask/main/examples/cpu.py -o cpu.py
 curl -L https://raw.githubusercontent.com/Hanno-Labs/hfdask/main/examples/cpu.yaml -o cluster.yaml
 ```
@@ -63,13 +63,13 @@ curl -L https://raw.githubusercontent.com/Hanno-Labs/hfdask/main/examples/cpu.ya
 program. It creates four partitions per live worker, so the Dask scheduler can use
 the full CPU pool. The script imports Dask and pandas, not hfdask.
 
-1. Authenticate the submitting machine with `uv run hf auth login`.
+1. Authenticate the submitting machine with `uv run --group deploy hf auth login`.
 2. Set your HF namespace in `cluster.yaml`.
 3. Review the two `cpu-basic` Jobs, the 15-minute timeout, and the public relay
    consent, then run:
 
 ```sh
-uv run hfdask run --cluster cluster.yaml cpu.py
+uv run --group deploy hfdask run --cluster cluster.yaml cpu.py
 ```
 
 The coordinator hosts the script and scheduler. Because `coordinator.worker: true`,
@@ -91,7 +91,7 @@ The CLI reads a strict YAML definition before staging source or submitting Jobs:
 | `coordinator.worker` | Run workers beside the scheduler, reserving one core for it |
 | `workers.flavor`, `workers.count` | Remote worker hardware and machine count |
 | `environment.image` | Bootstrap image containing Python and uv |
-| `environment.extras` | Locked project extras installed in every Job |
+| `environment.groups` | Locked dependency groups installed in every Job |
 | `mounts` | Hub repositories or buckets mounted into every Job |
 | `timeout` | HF Job lifetime such as `15m` or `2h` |
 | `network.public_relays` | Explicit consent to public discovery and relay fallback |
@@ -130,27 +130,38 @@ custom group tags without consuming artificial resource slots.
 
 ## Dependencies and bootstrap
 
-The base package includes distributed Dask, the HF client, PyYAML, Pydantic, and
-Iroh. The `dataframe` extra adds Dask DataFrame dependencies. The `inference` extra
-adds Dask DataFrame plus vLLM on Linux x86-64.
-
-The CLI ships the submitting project's `pyproject.toml` and `uv.lock`; every Job
-runs `uv sync --locked --no-dev` with the YAML-selected extras. The submitting
-machine does not need remote workload dependencies such as pandas, PyTorch, or
-vLLM.
-
-Install hfdask into each workload project with `uv add hfdask`, then declare remote
-workload dependencies in project extras whose names match `environment.extras` in
-the cluster YAML. For example, `environment.extras: [dataframe]` requires a
-`dataframe` project extra such as the one created by:
+Declare the libraries imported by your Dask program as normal project dependencies,
+independent of where the program will run:
 
 ```sh
-uv add --optional dataframe "dask[dataframe]>=2025.1,<2027"
+uv add "dask[dataframe,distributed]>=2025.1,<2027" pandas
 ```
 
-`uvx hfdask` alone is not supported: it gives the submitting process an isolated
-CLI, but does not put hfdask in the submitted project's lockfile for installation
-on the remote Jobs.
+Add hfdask to a deployment dependency group, then list that group under
+`environment.groups` in the cluster YAML. Dependency groups stay local to the
+project instead of becoming published package extras:
+
+```sh
+uv add --group deploy hfdask
+```
+
+```yaml
+environment:
+  groups: [deploy]
+```
+
+Enable the same group when submitting so the hfdask CLI is available locally:
+
+```sh
+uv run --group deploy hfdask run --cluster cluster.yaml cpu.py
+```
+
+hfdask ships the project's `pyproject.toml` and `uv.lock` to every Job and runs
+`uv sync --locked --no-dev --group deploy`. That installs the base workload
+together with hfdask's remote runner in one locked environment.
+
+An isolated `uvx hfdask` invocation cannot replace the dependency group because it
+does not add the remote runner to the submitted project's lockfile.
 
 ## Source shipping
 
@@ -213,7 +224,7 @@ to durable storage. The example output writes are not an atomic checkpoint proto
 From a repository checkout, generate the pdoc reference locally:
 
 ```sh
-uv sync --locked --extra docs
+uv sync --locked --group docs
 mise run docs
 open docs/hfdask.html
 ```

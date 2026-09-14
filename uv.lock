@@ -854,9 +854,17 @@ dependencies = [
     { name = "pyyaml" },
 ]
 
-[package.optional-dependencies]
-dataframe = [
+[package.dev-dependencies]
+deploy = [
     { name = "dask", extra = ["dataframe"] },
+]
+dev = [
+    { name = "build" },
+    { name = "dask", extra = ["dataframe"] },
+    { name = "pdoc" },
+    { name = "pytest" },
+    { name = "ruff" },
+    { name = "ty" },
 ]
 docs = [
     { name = "pdoc" },
@@ -866,31 +874,17 @@ inference = [
     { name = "vllm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
 
-[package.dev-dependencies]
-dev = [
-    { name = "build" },
-    { name = "dask", extra = ["dataframe"] },
-    { name = "pdoc" },
-    { name = "pytest" },
-    { name = "ruff" },
-    { name = "ty" },
-]
-
 [package.metadata]
 requires-dist = [
-    { name = "dask", extras = ["dataframe"], marker = "extra == 'dataframe'", specifier = ">=2025.1,<2027" },
-    { name = "dask", extras = ["dataframe"], marker = "extra == 'inference'", specifier = ">=2025.1,<2027" },
     { name = "dask", extras = ["distributed"], specifier = ">=2025.1,<2027" },
     { name = "huggingface-hub", specifier = ">=1.29,<2" },
     { name = "iroh", specifier = "==1.1.0" },
-    { name = "pdoc", marker = "extra == 'docs'", specifier = ">=15" },
     { name = "pydantic", specifier = ">=2.12,<3" },
     { name = "pyyaml", specifier = ">=6,<7" },
-    { name = "vllm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'inference'", specifier = ">=0.10,<1" },
 ]
-provides-extras = ["docs", "dataframe", "inference"]
 
 [package.metadata.requires-dev]
+deploy = [{ name = "dask", extras = ["dataframe"], specifier = ">=2025.1,<2027" }]
 dev = [
     { name = "build", specifier = ">=1.2" },
     { name = "dask", extras = ["dataframe"], specifier = ">=2025.1,<2027" },
@@ -898,6 +892,11 @@ dev = [
     { name = "pytest", specifier = ">=8" },
     { name = "ruff", specifier = ">=0.11" },
     { name = "ty", specifier = ">=0.0.61" },
+]
+docs = [{ name = "pdoc", specifier = ">=15" }]
+inference = [
+    { name = "dask", extras = ["dataframe"], specifier = ">=2025.1,<2027" },
+    { name = "vllm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", specifier = ">=0.10,<1" },
 ]
 
 [[package]]

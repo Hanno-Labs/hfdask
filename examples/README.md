@@ -29,33 +29,35 @@ GPUs. Submission reserves paid HF Jobs.
 
 ### Configure and run
 
-1. Create a Git-backed uv project with hfdask and an `inference` project extra. Pin
-   vLLM to the version supplied by the example image:
+1. Create a Git-backed uv project. Add the workload libraries as normal project
+   dependencies, pinning vLLM to the version supplied by the example image. Add
+   hfdask to the `inference` dependency group selected by the cluster YAML:
 
    ```sh
    mkdir hfdask-inference
    cd hfdask-inference
    git init
    uv init --bare
-   uv add hfdask
-   uv add --optional inference "dask[dataframe]>=2025.1,<2027" \
+   uv add "dask[dataframe,distributed]>=2025.1,<2027" pandas \
      "vllm==0.29.0; sys_platform == 'linux' and platform_machine == 'x86_64'"
+   uv add --group inference hfdask
    curl -L https://raw.githubusercontent.com/Hanno-Labs/hfdask/main/examples/job.py -o job.py
    curl -L https://raw.githubusercontent.com/Hanno-Labs/hfdask/main/examples/inference.yaml -o cluster.yaml
    ```
 
-2. Authenticate with `uv run hf auth login` and set `namespace` in `cluster.yaml`.
+2. Authenticate with `uv run --group inference hf auth login` and set `namespace`
+   in `cluster.yaml`.
 3. Create a private output bucket and seed a fresh prefix such as
    `hf://buckets/your-namespace/output/ag-news-run-001`; set it as `/output`.
 4. Review the `cpu-basic` and `l4x1` flavors, 30-minute timeout, and required
    `network.public_relays: true` consent, then run:
 
    ```sh
-   uv run hfdask run --cluster cluster.yaml job.py
+   uv run --group inference hfdask run --cluster cluster.yaml job.py
    ```
 
 The model and dataset are mounted directly from the Hub. No input bucket, manual
-model staging, custom Dockerfile, or local PyTorch/vLLM install is required.
+model staging, or custom Dockerfile is required.
 
 The YAML uses `vllm/vllm-openai:v0.29.0`, pinned to its Linux amd64 digest. The
 image supplies CUDA tooling, Python, and uv; hfdask runs its own bootstrap instead

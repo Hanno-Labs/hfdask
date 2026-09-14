@@ -10,7 +10,7 @@ workers:
 
 environment:
   image: ghcr.io/astral-sh/uv:python3.12-bookworm
-  extras: [dataframe]
+  groups: [deploy]
 
 timeout: 15m
 

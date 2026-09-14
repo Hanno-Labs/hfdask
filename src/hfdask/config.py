@@ -18,7 +18,7 @@ NodeIndex = Annotated[int, Field(strict=True, ge=0)]
 WorkerOrdinal = Annotated[int, Field(strict=True, ge=0)]
 Duration = Annotated[str, Field(pattern=r"^[1-9][0-9]*[smhd]$")]
 RelayURL = Annotated[str, Field(pattern=r"^https://")]
-ExtraName = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")]
+GroupName = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")]
 _ENTRYPOINT = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*:[A-Za-z_]\w*\Z")
 
 
@@ -143,39 +143,46 @@ class PlacementConfig(ConfigModel):
 
 class PackageConfig(ConfigModel):
     script: RelativeScript
-    extras: list[Text]
+    groups: list[GroupName]
 
 
 class ProjectConfig(ConfigModel):
     name: str = ""
     dependencies: list[str] = Field(default_factory=list)
-    optional_dependencies: dict[str, list[str]] = Field(
-        default_factory=dict, alias="optional-dependencies"
-    )
     model_config = ConfigDict(extra="ignore")
 
 
 class PackagePlan(PackageConfig):
     project: ProjectConfig
-
-    @model_validator(mode="after")
-    def require_declared_extras(self) -> Self:
-        for extra in self.extras:
-            if extra not in self.project.optional_dependencies:
-                raise ValueError(f"environment.extras contains undeclared project extra: {extra}")
-        return self
+    dependency_groups: dict[str, list[str | dict[str, str]]] = Field(
+        default_factory=dict, alias="dependency-groups"
+    )
 
     @model_validator(mode="after")
     def require_locked_runner_dependency(self) -> Self:
         dependencies = list(self.project.dependencies)
-        for extra in self.extras:
-            dependencies.extend(self.project.optional_dependencies[extra])
+        pending = list(self.groups)
+        selected: set[str] = set()
+        while pending:
+            group = pending.pop()
+            if group in selected:
+                continue
+            if group not in self.dependency_groups:
+                raise ValueError(
+                    f"environment.groups contains undeclared dependency group: {group}"
+                )
+            selected.add(group)
+            for item in self.dependency_groups[group]:
+                if isinstance(item, str):
+                    dependencies.append(item)
+                elif included := item.get("include-group"):
+                    pending.append(included)
         if self.project.name.lower().replace("_", "-") != "hfdask" and not any(
             re.match(r"(?i)^hfdask\s*(?:\[|[<>=!~@;]|$)", dep) for dep in dependencies
         ):
             raise ValueError(
-                "Add hfdask to project dependencies and regenerate uv.lock; "
-                "the runner must use the same locked environment"
+                "Add hfdask to project dependencies or a selected dependency group and "
+                "regenerate uv.lock; the runner must use the same locked environment"
             )
         return self
 
@@ -351,7 +358,7 @@ class WorkersConfig(ConfigModel):
 
 class EnvironmentConfig(ConfigModel):
     image: Text
-    extras: list[ExtraName] = Field(default_factory=list)
+    groups: list[GroupName] = Field(default_factory=list)
 
 
 class NetworkConfig(ConfigModel):

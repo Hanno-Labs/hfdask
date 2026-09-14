@@ -46,7 +46,7 @@ def require_safe_archive_member(
 
 
 def main() -> None:
-    extras = json.loads(sys.argv[1])
+    groups = json.loads(sys.argv[1])
     with SOURCE.open("rb") as source:
         payload = source.read(MAX_ARCHIVE_BYTES + 1)
     require_verified_payload(payload, sys.argv[2])
@@ -76,8 +76,8 @@ def main() -> None:
     if uv is None:
         raise SystemExit("environment.image must contain uv and Python")
     print("hfdask: syncing locked environment", flush=True)
-    extra_args = [arg for extra in extras for arg in ("--extra", extra)]
-    subprocess.run([uv, "sync", "--locked", "--no-dev", *extra_args], check=True)
+    group_args = [arg for group in groups for arg in ("--group", group)]
+    subprocess.run([uv, "sync", "--locked", "--no-dev", *group_args], check=True)
     print("hfdask: starting runner", flush=True)
     os.execv(uv, [uv, "run", "--no-sync", *sys.argv[3:]])
 

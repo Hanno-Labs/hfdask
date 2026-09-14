@@ -11,7 +11,7 @@ workers:
 environment:
   # v0.29.0, Linux amd64: CUDA tooling + Python + uv; hfdask runs no server.
   image: vllm/vllm-openai:v0.29.0@sha256:082ca6f035279109041ffd3fe0695cb568b29bc580b35c4f297a66a08b216c1b
-  extras: [inference]
+  groups: [inference]
 
 mounts:
   - source: hf://models/Qwen/Qwen3-0.6B

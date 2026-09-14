@@ -21,8 +21,9 @@ def project(tmp_path, monkeypatch):
     subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nname = "demo"\nversion = "0.1.0"\n'
-        'dependencies = ["hfdask==0.1.0"]\n'
-        "[project.optional-dependencies]\ninference = []\n"
+        'dependencies = ["dask[distributed]"]\n'
+        '[dependency-groups]\nrunner = ["hfdask==0.1.0"]\n'
+        'inference = [{ include-group = "runner" }]\n'
     )
     (tmp_path / "uv.lock").write_text("version = 1\n")
     (tmp_path / "job.py").write_text("from distributed import Client\nclient = Client()\n")
@@ -30,7 +31,7 @@ def project(tmp_path, monkeypatch):
         "namespace: example\ncoordinator:\n  flavor: cpu-basic\n"
         "workers:\n  flavor: h200\n  count: 4\nenvironment:\n"
         "  image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim\n"
-        "  extras: [inference]\ntimeout: 2h\nnetwork:\n  public_relays: true\n"
+        "  groups: [inference]\ntimeout: 2h\nnetwork:\n  public_relays: true\n"
         "mounts:\n  - source: hf://buckets/example/data\n"
         "    target: /data\n    read_only: true\n"
     )
@@ -42,9 +43,9 @@ def project(tmp_path, monkeypatch):
 
 
 def test_yaml_contract(project):
-    spec, options, timeout, extras = cli.load_cluster(project / "inference.yaml", project, "job.py")
+    spec, options, timeout, groups = cli.load_cluster(project / "inference.yaml", project, "job.py")
     assert spec.bootstrap == ()
-    spec = cli.prepare_spec(spec, project, "job.py", extras, cli.HfApi())
+    spec = cli.prepare_spec(spec, project, "job.py", groups, cli.HfApi())
     assert spec.workers == 4
     assert spec.flavor == "h200"
     assert spec.entrypoint == "hfdask.runner:run_script"
@@ -133,7 +134,7 @@ def test_archive_excludes_node_keys_and_secret_directories(project, name, tracke
     path.write_text("HFDASK_NODE_KEY=private-key-material\n")
     if tracked:
         subprocess.run(["git", "add", "-f", "--", name], check=True)
-    payload = cli.package_project(project, "job.py", [])
+    payload = cli.package_project(project, "job.py", ["inference"])
     with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
         assert name not in archive.getnames()
         for member in archive.getmembers():
@@ -151,11 +152,11 @@ def test_script_must_be_project_relative(project, script):
 def test_nested_script(project, script):
     (project / "examples").mkdir()
     (project / "examples/job.py").write_text("print('nested')\n")
-    spec, _, _, extras = cli.load_cluster(project / "inference.yaml", project, script)
+    spec, _, _, groups = cli.load_cluster(project / "inference.yaml", project, script)
     assert spec.kwargs == {"script": script}
     assert spec.env["PYTHONPATH"] == "/tmp/hfdask-project:/tmp/hfdask-project/examples"
     with tarfile.open(
-        fileobj=io.BytesIO(cli.package_project(project, script, extras)), mode="r:gz"
+        fileobj=io.BytesIO(cli.package_project(project, script, groups)), mode="r:gz"
     ) as archive:
         assert "examples/job.py" in archive.getnames()
 
@@ -179,15 +180,22 @@ def test_missing_lock(project):
 
 
 def test_require_locked_runner_dependency(project):
-    (project / "pyproject.toml").write_text('[project]\nname="demo"\ndependencies=[]\n')
+    (project / "pyproject.toml").write_text(
+        '[project]\nname="demo"\ndependencies=[]\n[dependency-groups]\ndeploy=["hfdask"]\n'
+    )
     with pytest.raises(ValueError, match="Add hfdask"):
         cli.package_project(project, "job.py", [])
+
+
+def test_require_declared_dependency_group(project):
+    with pytest.raises(ValueError, match="undeclared dependency group"):
+        cli.package_project(project, "job.py", ["missing"])
 
 
 def test_archive_limit(project, monkeypatch):
     monkeypatch.setattr(cli, "MAX_ARCHIVE_BYTES", 1)
     with pytest.raises(ValueError, match="8 MiB"):
-        cli.package_project(project, "job.py", [])
+        cli.package_project(project, "job.py", ["inference"])
 
 
 @pytest.mark.parametrize("replacement", ["count: true", "count: 64", "count: 0"])
@@ -287,12 +295,12 @@ def test_example_pins_input_mounts():
 
 def test_cpu_example_is_unannotated_dataframe_cluster():
     root = Path(__file__).parents[1]
-    spec, options, _, extras = cli.load_cluster(root / "examples/cpu.yaml", root, "examples/cpu.py")
+    spec, options, _, groups = cli.load_cluster(root / "examples/cpu.yaml", root, "examples/cpu.py")
     assert spec.flavor == "cpu-basic"
     assert spec.workers == 2
     assert not spec.volumes
     assert options["scheduler_worker"] is True
-    assert extras == ["dataframe"]
+    assert groups == ["deploy"]
     source = (root / "examples/cpu.py").read_text()
     assert "dask.dataframe" in source
     assert "dask.annotate" not in source
@@ -308,9 +316,9 @@ def test_explicit_relay_consent(project):
 def test_bootstrap_forwards_appended_mesh_arguments(project, monkeypatch, capsys):
 
     (project / "large.lock").write_bytes(random.Random(0).randbytes(100_000))
-    spec, _, _, extras = cli.load_cluster(project / "inference.yaml", project, "job.py")
+    spec, _, _, groups = cli.load_cluster(project / "inference.yaml", project, "job.py")
     api = cli.HfApi()
-    command = cli.prepare_spec(spec, project, "job.py", extras, api).bootstrap
+    command = cli.prepare_spec(spec, project, "job.py", groups, api).bootstrap
     payload, _ = api.batch_bucket_files.call_args.kwargs["add"][0]
     mounted = project / "project.tar.gz"
     mounted.write_bytes(payload)
@@ -343,7 +351,7 @@ def test_bootstrap_forwards_appended_mesh_arguments(project, monkeypatch, capsys
     monkeypatch.setattr(bootstrap, "ROOT", destination)
     bootstrap.main()
     sync.assert_called_once_with(
-        ["/usr/bin/uv", "sync", "--locked", "--no-dev", "--extra", "inference"], check=True
+        ["/usr/bin/uv", "sync", "--locked", "--no-dev", "--group", "inference"], check=True
     )
     assert execute.call_args.args[1] == [
         "/usr/bin/uv",
@@ -392,7 +400,7 @@ def test_lifecycle(project, monkeypatch, failure):
     )
     assert result == (130 if failure == "interrupt" else 1 if failure else 0)
     assert captured["options"]["api"] is cli.HfApi()
-    assert "extras" not in captured["options"]
+    assert "groups" not in captured["options"]
     cli.HfApi().batch_bucket_files.assert_called_once()
     assert len(captured["identities"]) == 5
     assert len({identity.secret for identity in captured["identities"]}) == 5
@@ -477,20 +485,16 @@ def test_interrupt_submission_retains_known_jobs(monkeypatch):
     assert raised.value.cluster.jobs[0].id == "known"
 
 
-def test_own_project_needs_no_transport_extra(project):
+def test_own_project_needs_no_runner_dependency(project):
     path = project / "pyproject.toml"
-    path.write_text(
-        path.read_text()
-        .replace('name = "demo"', 'name = "hfdask"')
-        .replace('dependencies = ["hfdask==0.1.0"]', 'dependencies = ["iroh==1.1.0"]')
-    )
-    assert isinstance(cli.package_project(project, "job.py", ["inference"]), bytes)
+    path.write_text(path.read_text().replace('name = "demo"', 'name = "hfdask"'))
+    assert isinstance(cli.package_project(project, "job.py", []), bytes)
 
 
 @pytest.mark.parametrize("dependency", ["hfdask", "hfdask>=0.1", "hfdask[inference]==0.1.0"])
-def test_plain_runner_dependency(project, dependency):
+def test_base_runner_dependency(project, dependency):
     path = project / "pyproject.toml"
-    path.write_text(path.read_text().replace("hfdask==0.1.0", dependency))
+    path.write_text(f'[project]\nname="demo"\ndependencies=["{dependency}"]\n')
     assert isinstance(cli.package_project(project, "job.py", []), bytes)
 
 
@@ -524,7 +528,7 @@ def test_bootstrap_rejects_traversal(project, monkeypatch):
 
 def test_archive_above_old_inline_limit(project):
     (project / "large.lock").write_bytes(random.Random(0).randbytes(513 * 1024))
-    assert len(cli.package_project(project, "job.py", [])) > 512 * 1024
+    assert len(cli.package_project(project, "job.py", ["inference"])) > 512 * 1024
 
 
 @pytest.mark.parametrize("limit", ["MAX_SOURCE_BYTES", "MAX_FILES"])
@@ -567,9 +571,9 @@ def test_bootstrap_rejects_bad_source(project, monkeypatch, kind):
 
 
 def test_staging_uses_private_bucket_multipart_and_unique_prefix(project, capsys):
-    spec, _, _, extras = cli.load_cluster(project / "inference.yaml", project, "job.py")
+    spec, _, _, groups = cli.load_cluster(project / "inference.yaml", project, "job.py")
     api = cli.HfApi()
-    staged = cli.prepare_spec(spec, project, "job.py", extras, api)
+    staged = cli.prepare_spec(spec, project, "job.py", groups, api)
     api.create_bucket.assert_called_once_with("example/jobs-artifacts", private=True, exist_ok=True)
     api.bucket_info.assert_called_once_with("example/jobs-artifacts")
     assert [call[0] for call in api.method_calls] == [
@@ -593,12 +597,12 @@ def test_staging_uses_private_bucket_multipart_and_unique_prefix(project, capsys
     assert staged.bootstrap == (
         "python3",
         "/tmp/hfdask-source/bootstrap.py",
-        json.dumps(extras),
+        json.dumps(groups),
         hashlib.sha256(payload).hexdigest(),
     )
     assert staged.env == spec.env
     assert spec.bootstrap == ()
-    again = cli.prepare_spec(spec, project, "job.py", extras, api)
+    again = cli.prepare_spec(spec, project, "job.py", groups, api)
     assert again.volumes[-1].path != volume.path
     log = capsys.readouterr().err
     assert f"hf://buckets/example/jobs-artifacts/{remote_path}" in log
@@ -662,7 +666,7 @@ def test_submission_cause_logging_is_preserved(project, monkeypatch, capsys):
     cluster.close.assert_called_once()
 
 
-def test_invalid_extra_never_uploads(project):
+def test_invalid_group_never_uploads(project):
     spec, _, _, _ = cli.load_cluster(project / "inference.yaml", project, "job.py")
     with pytest.raises(ValueError, match="undeclared"):
         cli.prepare_spec(spec, project, "job.py", ["missing"], cli.HfApi())
