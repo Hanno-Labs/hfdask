@@ -29,16 +29,29 @@ GPUs. Submission reserves paid HF Jobs.
 
 ### Configure and run
 
-1. Authenticate with `hf auth login` and set `namespace` in `inference.yaml`.
-2. Create a private output bucket and seed a fresh prefix such as
-   `hf://buckets/your-namespace/output/ag-news-run-001`; set it as `/output`.
-3. Review the `cpu-basic` and `l4x1` flavors, 30-minute timeout, and required
-   `network.public_relays: true` consent.
-4. From the repository root:
+1. Create a Git-backed uv project with hfdask and an `inference` project extra. Pin
+   vLLM to the version supplied by the example image:
 
    ```sh
-   uv sync --locked --no-dev
-   uv run --no-sync hfdask run --cluster examples/inference.yaml examples/job.py
+   mkdir hfdask-inference
+   cd hfdask-inference
+   git init
+   uv init --bare
+   uv add hfdask
+   uv add --optional inference "dask[dataframe]>=2025.1,<2027" \
+     "vllm==0.29.0; sys_platform == 'linux' and platform_machine == 'x86_64'"
+   curl -L https://raw.githubusercontent.com/Hanno-Labs/hfdask/main/examples/job.py -o job.py
+   curl -L https://raw.githubusercontent.com/Hanno-Labs/hfdask/main/examples/inference.yaml -o cluster.yaml
+   ```
+
+2. Authenticate with `uv run hf auth login` and set `namespace` in `cluster.yaml`.
+3. Create a private output bucket and seed a fresh prefix such as
+   `hf://buckets/your-namespace/output/ag-news-run-001`; set it as `/output`.
+4. Review the `cpu-basic` and `l4x1` flavors, 30-minute timeout, and required
+   `network.public_relays: true` consent, then run:
+
+   ```sh
+   uv run hfdask run --cluster cluster.yaml job.py
    ```
 
 The model and dataset are mounted directly from the Hub. No input bucket, manual

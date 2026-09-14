@@ -5,22 +5,32 @@ hfdask ships the current Git working tree, starts a coordinator Job and worker J
 connects them through an authenticated encrypted mesh, and cleans up the paid Jobs
 when the program finishes.
 
-> **Status:** pre-release (`0.1.0`). Development and examples currently run from
-> this checkout. Public repository visibility, release tags, and package publication
-> are intentionally deferred until the implementation and documentation are ready.
+> **Status:** pre-release (`0.1.0`). APIs and configuration may change before the
+> first stable release.
 
 ## Why hfdask
 
-Hugging Face Jobs already provides CPU and GPU machines plus native model, dataset,
-Space, and bucket mounts. Dask already provides distributed DataFrames, arrays, and
-task graphs. hfdask supplies the missing cluster lifecycle between them:
+We like working in the Hugging Face ecosystem and find ourselves using it for more
+and more of our work. Hugging Face Jobs gives us on-demand CPUs and GPUs alongside
+native access to models, datasets, Spaces, and buckets.
 
-- ordinary Dask scripts, without a framework-specific `run(client, ...)` wrapper;
-- heterogeneous CPU and GPU worker machines;
-- one single-threaded worker process per complete CPU core;
-- locked project dependencies and Git-aware source shipping;
-- authenticated, encrypted connections without a public Dask scheduler;
-- recovery manifests and verified Job cleanup.
+Much of that work combines CPU-heavy data transformation with GPU-heavy inference.
+We like expressing these pipelines in Dask: ordinary Python task graphs make it easy
+to parallelize transformations, preserve dependencies between stages, and schedule
+each task on suitable hardware. What was missing was a way to run that same Dask
+programming model across Hugging Face Jobs.
+
+hfdask connects the two. It turns a YAML cluster definition into a temporary Dask
+cluster on Hugging Face Jobs, runs an ordinary Dask script, and cleans up the Jobs
+when the program finishes. This lets us:
+
+- use CPU and GPU Jobs together in one Dask task graph;
+- keep data transformation, inference, and aggregation in one program;
+- use native Hugging Face model, dataset, Space, and bucket mounts;
+- ship a locked project environment and the current Git working tree;
+- connect the cluster over an authenticated, encrypted mesh without exposing a
+  public Dask scheduler;
+- recover and clean up paid Jobs when a run fails or is interrupted.
 
 ```text
 submitting machine
@@ -34,17 +44,32 @@ optional CPU workers               optional exclusive GPU assignments
 
 ## CPU-only quickstart
 
+Create a Git-backed uv project and add hfdask as a locked project dependency. The
+remote Jobs use this same lockfile, so installing only an isolated CLI with `uvx` is
+not sufficient.
+
+```sh
+mkdir hfdask-quickstart
+cd hfdask-quickstart
+git init
+uv init --bare
+uv add hfdask
+uv add --optional dataframe "dask[dataframe]>=2025.1,<2027"
+curl -L https://raw.githubusercontent.com/Hanno-Labs/hfdask/main/examples/cpu.py -o cpu.py
+curl -L https://raw.githubusercontent.com/Hanno-Labs/hfdask/main/examples/cpu.yaml -o cluster.yaml
+```
+
 [`examples/cpu.py`](examples/cpu.py) is a normal, unannotated Dask DataFrame
 program. It creates four partitions per live worker, so the Dask scheduler can use
 the full CPU pool. The script imports Dask and pandas, not hfdask.
 
-1. Authenticate the submitting machine with `hf auth login`.
-2. Set your HF namespace in [`examples/cpu.yaml`](examples/cpu.yaml).
-3. Review the two `cpu-basic` Jobs and the 15-minute timeout, then run:
+1. Authenticate the submitting machine with `uv run hf auth login`.
+2. Set your HF namespace in `cluster.yaml`.
+3. Review the two `cpu-basic` Jobs, the 15-minute timeout, and the public relay
+   consent, then run:
 
 ```sh
-uv sync --locked --no-dev
-uv run --no-sync hfdask run --cluster examples/cpu.yaml examples/cpu.py
+uv run hfdask run --cluster cluster.yaml cpu.py
 ```
 
 The coordinator hosts the script and scheduler. Because `coordinator.worker: true`,
@@ -109,14 +134,23 @@ The base package includes distributed Dask, the HF client, PyYAML, Pydantic, and
 Iroh. The `dataframe` extra adds Dask DataFrame dependencies. The `inference` extra
 adds Dask DataFrame plus vLLM on Linux x86-64.
 
-The CLI ships `pyproject.toml` and `uv.lock`; every Job runs
-`uv sync --locked --no-dev` with the YAML-selected extras. The submitting machine
-does not need remote workload dependencies such as pandas, PyTorch, or vLLM.
+The CLI ships the submitting project's `pyproject.toml` and `uv.lock`; every Job
+runs `uv sync --locked --no-dev` with the YAML-selected extras. The submitting
+machine does not need remote workload dependencies such as pandas, PyTorch, or
+vLLM.
 
-For now, the examples run from this repository itself. An external project must
-declare a resolvable `hfdask` dependency, declare all workload dependencies or
-selected extras, and regenerate its lockfile. The public installation command will
-be documented when distribution is enabled.
+Install hfdask into each workload project with `uv add hfdask`, then declare remote
+workload dependencies in project extras whose names match `environment.extras` in
+the cluster YAML. For example, `environment.extras: [dataframe]` requires a
+`dataframe` project extra such as the one created by:
+
+```sh
+uv add --optional dataframe "dask[dataframe]>=2025.1,<2027"
+```
+
+`uvx hfdask` alone is not supported: it gives the submitting process an isolated
+CLI, but does not put hfdask in the submitted project's lockfile for installation
+on the remote Jobs.
 
 ## Source shipping
 
@@ -176,7 +210,7 @@ to durable storage. The example output writes are not an atomic checkpoint proto
 
 ## API documentation
 
-Generate the pdoc reference locally:
+From a repository checkout, generate the pdoc reference locally:
 
 ```sh
 uv sync --locked --extra docs
