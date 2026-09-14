@@ -174,8 +174,8 @@ class PackagePlan(PackageConfig):
             re.match(r"(?i)^hfdask\s*(?:\[|[<>=!~@;]|$)", dep) for dep in dependencies
         ):
             raise ValueError(
-                "Add hfdask to project dependencies (uv add hfdask) "
-                "and regenerate uv.lock; the runner must use the same locked environment"
+                "Add hfdask to project dependencies and regenerate uv.lock; "
+                "the runner must use the same locked environment"
             )
         return self
 

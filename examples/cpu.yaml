@@ -1,0 +1,18 @@
+namespace: your-namespace
+
+coordinator:
+  flavor: cpu-basic
+  worker: true
+
+workers:
+  flavor: cpu-basic
+  count: 1
+
+environment:
+  image: ghcr.io/astral-sh/uv:python3.12-bookworm
+  extras: [dataframe]
+
+timeout: 15m
+
+network:
+  public_relays: true

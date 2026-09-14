@@ -855,6 +855,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+dataframe = [
+    { name = "dask", extra = ["dataframe"] },
+]
 docs = [
     { name = "pdoc" },
 ]
@@ -875,6 +878,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "dask", extras = ["dataframe"], marker = "extra == 'dataframe'", specifier = ">=2025.1,<2027" },
     { name = "dask", extras = ["dataframe"], marker = "extra == 'inference'", specifier = ">=2025.1,<2027" },
     { name = "dask", extras = ["distributed"], specifier = ">=2025.1,<2027" },
     { name = "huggingface-hub", specifier = ">=1.29,<2" },
@@ -884,7 +888,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6,<7" },
     { name = "vllm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'inference'", specifier = ">=0.10,<1" },
 ]
-provides-extras = ["docs", "inference"]
+provides-extras = ["docs", "dataframe", "inference"]
 
 [package.metadata.requires-dev]
 dev = [

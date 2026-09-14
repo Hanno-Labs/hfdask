@@ -285,6 +285,19 @@ def test_example_pins_input_mounts():
     assert output.type == "bucket" and output.read_only is False
 
 
+def test_cpu_example_is_unannotated_dataframe_cluster():
+    root = Path(__file__).parents[1]
+    spec, options, _, extras = cli.load_cluster(root / "examples/cpu.yaml", root, "examples/cpu.py")
+    assert spec.flavor == "cpu-basic"
+    assert spec.workers == 2
+    assert not spec.volumes
+    assert options["scheduler_worker"] is True
+    assert extras == ["dataframe"]
+    source = (root / "examples/cpu.py").read_text()
+    assert "dask.dataframe" in source
+    assert "dask.annotate" not in source
+
+
 def test_explicit_relay_consent(project):
     path = project / "inference.yaml"
     path.write_text(path.read_text().replace("public_relays: true", "public_relays: false"))

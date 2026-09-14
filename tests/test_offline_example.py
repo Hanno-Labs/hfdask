@@ -78,6 +78,21 @@ def source():
     )
 
 
+def test_cpu_dataframe_example(capsys):
+    spec = importlib.util.spec_from_file_location(
+        "cpu_example", Path(__file__).parents[1] / "examples" / "cpu.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    with LocalCluster(
+        n_workers=2, threads_per_worker=1, processes=False, dashboard_address=None
+    ) as cluster:
+        with Client(cluster, set_as_default=False) as client, client.as_current():
+            result = module.calculate(100)
+    assert result == {"rows": 100, "workers": 2, "partitions": 8, "sum": 9900}
+    assert capsys.readouterr().out == ""
+
+
 def test_sample_determinism_balance_and_ids(example, source):
     job, _ = example
     sample = job.select_sample(source)
