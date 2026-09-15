@@ -31,6 +31,7 @@ run = "uv run --group docs pdoc --docformat google -t pdoc-templates -o docs hfd
 description = "Build wheel and source distribution"
 sources = ["src/**/*.py", "tests/**/*.py", "examples/**/*", "pdoc-templates/*.jinja2", "README.md", "LICENSE", "pyproject.toml", "uv.lock"]
 run = [
-    "uv build",
+    "uv build --clear",
+    "tar -tzf dist/hfdask-*.tar.gz >/dev/null",
     "if tar -tzf dist/hfdask-*.tar.gz | grep -Eq '/(\\.cache|\\.venv|dist|docs)/'; then echo 'source distribution contains build or cache files' >&2; exit 1; fi",
 ]

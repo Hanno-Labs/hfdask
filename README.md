@@ -5,14 +5,15 @@ hfdask ships the current Git working tree, starts a coordinator Job and worker J
 connects them through an authenticated encrypted mesh, and cleans up the paid Jobs
 when the program finishes.
 
-> **Status:** pre-release (`0.1.0`). APIs and configuration may change before the
+> **Status:** pre-release (`0.1.1`). APIs and configuration may change before the
 > first stable release.
 
 ## Why hfdask
 
 We like working in the Hugging Face ecosystem and find ourselves using it for more
-and more of our work. Hugging Face Jobs gives us on-demand CPUs and GPUs alongside
-native access to models, datasets, Spaces, and buckets.
+and more of our work. [Hugging Face Jobs](https://huggingface.co/docs/huggingface_hub/en/guides/jobs)
+runs scripts and containers on managed, on-demand CPUs and GPUs alongside native
+access to models, datasets, Spaces, and buckets.
 
 Much of that work combines CPU-heavy data transformation with GPU-heavy inference.
 We like expressing these pipelines in Dask: ordinary Python task graphs make it easy
@@ -53,13 +54,14 @@ mkdir hfdask-quickstart
 cd hfdask-quickstart
 git init
 uv init --bare --python 3.12
+uv python pin 3.12
 uv add "dask[dataframe,distributed]>=2025.1,<2027" pandas
 uv add --group deploy hfdask
-curl -fL https://raw.githubusercontent.com/Hanno-Labs/hfdask/v0.1.0/examples/cpu.py -o cpu.py
-curl -fL https://raw.githubusercontent.com/Hanno-Labs/hfdask/v0.1.0/examples/cpu.yaml -o cluster.yaml
+curl -fL https://raw.githubusercontent.com/Hanno-Labs/hfdask/v0.1.1/examples/cpu.py -o cpu.py
+curl -fL https://raw.githubusercontent.com/Hanno-Labs/hfdask/v0.1.1/examples/cpu.yaml -o cluster.yaml
 ```
 
-[`examples/cpu.py`](https://github.com/Hanno-Labs/hfdask/blob/v0.1.0/examples/cpu.py) is a normal, unannotated Dask DataFrame
+[`examples/cpu.py`](https://github.com/Hanno-Labs/hfdask/blob/v0.1.1/examples/cpu.py) is a normal, unannotated Dask DataFrame
 program. It creates four partitions per live worker, so the Dask scheduler can use
 the full CPU pool. The script imports Dask and pandas, not hfdask.
 
@@ -78,7 +80,7 @@ cores. The separate worker Job uses every complete CPU core. Neither the YAML no
 the DataFrame graph contains Hugging Face-specific task annotations.
 
 For heterogeneous CPU → GPU → CPU execution with mounted Hub data and worker-local
-vLLM engines, see the [AG News inference example](https://github.com/Hanno-Labs/hfdask/blob/v0.1.0/examples/README.md#gpu-inference).
+vLLM engines, see the [AG News inference example](https://github.com/Hanno-Labs/hfdask/blob/v0.1.1/examples/README.md#gpu-inference).
 
 ## Cluster configuration
 
@@ -230,7 +232,7 @@ open docs/hfdask.html
 ```
 
 The generated `docs/` directory is ignored build output. The tracked
-[`pdoc-templates`](https://github.com/Hanno-Labs/hfdask/tree/v0.1.0/pdoc-templates) directory is source configuration. The reference
+[`pdoc-templates`](https://github.com/Hanno-Labs/hfdask/tree/v0.1.1/pdoc-templates) directory is source configuration. The reference
 documents the public package and implementation modules but intentionally excludes
 the standalone pre-installation `hfdask.bootstrap` script.
 
@@ -257,4 +259,4 @@ HFDASK_TEST_KEYS=1 uv run pytest tests/test_iroh_integration.py
 
 ## License
 
-[Apache-2.0](https://github.com/Hanno-Labs/hfdask/blob/v0.1.0/LICENSE).
+[Apache-2.0](https://github.com/Hanno-Labs/hfdask/blob/v0.1.1/LICENSE).

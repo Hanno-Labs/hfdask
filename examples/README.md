@@ -38,11 +38,12 @@ GPUs. Submission reserves paid HF Jobs.
    cd hfdask-inference
    git init
    uv init --bare --python 3.12
+   uv python pin 3.12
    uv add "dask[dataframe,distributed]>=2025.1,<2027" pandas \
      "vllm==0.29.0; sys_platform == 'linux' and platform_machine == 'x86_64'"
    uv add --group inference hfdask
-   curl -fL https://raw.githubusercontent.com/Hanno-Labs/hfdask/v0.1.0/examples/job.py -o job.py
-   curl -fL https://raw.githubusercontent.com/Hanno-Labs/hfdask/v0.1.0/examples/inference.yaml -o cluster.yaml
+   curl -fL https://raw.githubusercontent.com/Hanno-Labs/hfdask/v0.1.1/examples/job.py -o job.py
+   curl -fL https://raw.githubusercontent.com/Hanno-Labs/hfdask/v0.1.1/examples/inference.yaml -o cluster.yaml
    ```
 
 2. Authenticate with `uv run --group inference hf auth login` and set `namespace`
