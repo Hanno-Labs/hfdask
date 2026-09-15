@@ -21,6 +21,8 @@ jobs:
       - name: Lint
         run: mise run lint
       - name: Test
+        env:
+          HFDASK_TEST_KEYS: '1'
         run: mise run test
       - name: Build API documentation
         run: mise run docs
