@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "hfdask"
 version = "0.1.0"
 description = "Run Dask workloads on Hugging Face Jobs"
+authors = [{ name = "Stephen Solka" }]
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
@@ -17,6 +18,11 @@ dependencies = [
     "iroh==1.1.0",
     "pydantic>=2.12,<3",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Hanno-Labs/hfdask"
+Repository = "https://github.com/Hanno-Labs/hfdask"
+Issues = "https://github.com/Hanno-Labs/hfdask/issues"
 
 [project.scripts]
 hfdask = "hfdask.cli:main"

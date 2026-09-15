@@ -2,7 +2,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from hfdask.runner import run, run_script
+from hfdask.runner import close_nannies, run, run_script
 
 
 def test_real_multiprocess_cluster(monkeypatch):
@@ -17,6 +17,20 @@ def test_real_multiprocess_cluster(monkeypatch):
         9,
         16,
     ]
+
+
+def test_close_nannies_uses_nanny_owned_shutdown():
+    client = MagicMock()
+    client.scheduler_info.return_value = {"workers": {"worker-a": {}, "worker-b": {}}}
+
+    close_nannies(client)
+
+    client.sync.assert_called_once_with(
+        client.scheduler.broadcast,
+        msg={"op": "terminate", "reason": "hfdask-workload-complete", "reply": False},
+        workers=["worker-a", "worker-b"],
+        nanny=True,
+    )
 
 
 def test_cleanup_on_failure(monkeypatch):

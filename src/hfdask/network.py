@@ -8,6 +8,7 @@ identity can access only this node's registered Dask services, not arbitrary TCP
 from __future__ import annotations
 
 import asyncio
+import errno
 import logging
 import resource
 from collections.abc import Coroutine, Sequence
@@ -152,7 +153,11 @@ async def bridge(
             writer.write(data)
             await writer.drain()
         if writer.can_write_eof():
-            writer.write_eof()
+            try:
+                writer.write_eof()
+            except OSError as error:
+                if error.errno not in {errno.ECONNRESET, errno.ENOTCONN, errno.EPIPE}:
+                    raise
 
     tasks = [asyncio.create_task(upload()), asyncio.create_task(download())]
     try:

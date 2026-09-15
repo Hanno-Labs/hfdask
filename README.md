@@ -52,14 +52,14 @@ selected by the cluster YAML.
 mkdir hfdask-quickstart
 cd hfdask-quickstart
 git init
-uv init --bare
+uv init --bare --python 3.12
 uv add "dask[dataframe,distributed]>=2025.1,<2027" pandas
 uv add --group deploy hfdask
-curl -L https://raw.githubusercontent.com/Hanno-Labs/hfdask/main/examples/cpu.py -o cpu.py
-curl -L https://raw.githubusercontent.com/Hanno-Labs/hfdask/main/examples/cpu.yaml -o cluster.yaml
+curl -fL https://raw.githubusercontent.com/Hanno-Labs/hfdask/v0.1.0/examples/cpu.py -o cpu.py
+curl -fL https://raw.githubusercontent.com/Hanno-Labs/hfdask/v0.1.0/examples/cpu.yaml -o cluster.yaml
 ```
 
-[`examples/cpu.py`](examples/cpu.py) is a normal, unannotated Dask DataFrame
+[`examples/cpu.py`](https://github.com/Hanno-Labs/hfdask/blob/v0.1.0/examples/cpu.py) is a normal, unannotated Dask DataFrame
 program. It creates four partitions per live worker, so the Dask scheduler can use
 the full CPU pool. The script imports Dask and pandas, not hfdask.
 
@@ -78,7 +78,7 @@ cores. The separate worker Job uses every complete CPU core. Neither the YAML no
 the DataFrame graph contains Hugging Face-specific task annotations.
 
 For heterogeneous CPU → GPU → CPU execution with mounted Hub data and worker-local
-vLLM engines, see the [AG News inference example](examples/README.md#gpu-inference).
+vLLM engines, see the [AG News inference example](https://github.com/Hanno-Labs/hfdask/blob/v0.1.0/examples/README.md#gpu-inference).
 
 ## Cluster configuration
 
@@ -230,7 +230,7 @@ open docs/hfdask.html
 ```
 
 The generated `docs/` directory is ignored build output. The tracked
-[`pdoc-templates`](pdoc-templates/) directory is source configuration. The reference
+[`pdoc-templates`](https://github.com/Hanno-Labs/hfdask/tree/v0.1.0/pdoc-templates) directory is source configuration. The reference
 documents the public package and implementation modules but intentionally excludes
 the standalone pre-installation `hfdask.bootstrap` script.
 
@@ -257,4 +257,4 @@ HFDASK_TEST_KEYS=1 uv run pytest tests/test_iroh_integration.py
 
 ## License
 
-[Apache-2.0](LICENSE).
+[Apache-2.0](https://github.com/Hanno-Labs/hfdask/blob/v0.1.0/LICENSE).

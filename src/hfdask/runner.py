@@ -200,6 +200,18 @@ def wait_topology(client: Client, workers_per_node: tuple[int, ...], timeout: fl
         time.sleep(0.2)
 
 
+def close_nannies(client: Client) -> None:
+    """Ask each nanny to stop its worker instead of closing worker processes first."""
+    workers = list(client.scheduler_info()["workers"])
+    scheduler = cast(Any, client.scheduler)
+    client.sync(
+        scheduler.broadcast,
+        msg={"op": "terminate", "reason": "hfdask-workload-complete", "reply": False},
+        workers=workers,
+        nanny=True,
+    )
+
+
 async def run_detected(
     args: argparse.Namespace,
     config: dict[str, Any],
@@ -293,7 +305,7 @@ async def run_detected(
                     with Client("tcp://127.0.0.1:21000", set_as_default=False) as client:
                         wait_topology(client, workers_per_node, config["startup_timeout"])
                         require_callable_entrypoint(args.entrypoint)(client, **kwargs)
-                        client.retire_workers(close_workers=True)
+                        close_nannies(client)
 
                 await asyncio.to_thread(workload)
                 print(json.dumps({"phase": "workload_complete"}), flush=True)

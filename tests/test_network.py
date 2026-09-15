@@ -1,4 +1,5 @@
 import asyncio
+import errno
 import resource
 from unittest.mock import AsyncMock, MagicMock
 
@@ -170,6 +171,45 @@ def test_bridge_half_close():
         stream.send.return_value.finish.assert_awaited_once()
         writer.write.assert_called_once_with(b"reply")
         writer.close.assert_called_once()
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("code", [errno.ECONNRESET, errno.ENOTCONN, errno.EPIPE])
+def test_bridge_ignores_closed_writer_half_close(code):
+    async def check():
+        reader = asyncio.StreamReader()
+        reader.feed_eof()
+        writer = MagicMock()
+        writer.can_write_eof.return_value = True
+        writer.write_eof.side_effect = OSError(code, "connection closed")
+        writer.drain = AsyncMock()
+        writer.wait_closed = AsyncMock()
+        stream = MagicMock()
+        stream.send.return_value.finish = AsyncMock()
+        stream.send.return_value.stopped = AsyncMock()
+        stream.recv.return_value.read = AsyncMock(return_value=b"")
+        await bridge(reader, writer, stream)
+        writer.close.assert_called_once()
+
+    asyncio.run(check())
+
+
+def test_bridge_propagates_unexpected_half_close_error():
+    async def check():
+        reader = asyncio.StreamReader()
+        reader.feed_eof()
+        writer = MagicMock()
+        writer.can_write_eof.return_value = True
+        writer.write_eof.side_effect = OSError(errno.EBADF, "bad file descriptor")
+        writer.drain = AsyncMock()
+        writer.wait_closed = AsyncMock()
+        stream = MagicMock()
+        stream.send.return_value.finish = AsyncMock()
+        stream.send.return_value.stopped = AsyncMock()
+        stream.recv.return_value.read = AsyncMock(return_value=b"")
+        with pytest.raises(OSError, match="bad file descriptor"):
+            await bridge(reader, writer, stream)
 
     asyncio.run(check())
 
