@@ -26,6 +26,3 @@ mounts:
     read_only: false
 
 timeout: 30m
-
-network:
-  public_relays: true

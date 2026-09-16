@@ -24,7 +24,7 @@ from uuid import uuid4
 
 from huggingface_hub import HfApi, Volume
 
-from .cluster import Cluster, Identity, LaunchError, submit_cluster
+from .cluster import Cluster, LaunchError, submit_cluster
 from .config import MOUNT_SOURCE, ClusterConfig, PackageConfig, PackagePlan, ProjectConfig
 from .jobs import JobSpec
 
@@ -254,7 +254,6 @@ def load_cluster(
         },
     )
     options: dict[str, Any] = {
-        "public_relays": True,
         "scheduler_worker": scheduler_worker,
         "scheduler_flavor": config.coordinator.flavor,
     }
@@ -297,12 +296,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     try:
         spec, options, timeout, groups = load_cluster(args.cluster, Path.cwd(), args.script)
-        nodes = spec.workers + 1 - int(options["scheduler_worker"])
-        identities = [Identity(secrets.token_bytes(32)) for _ in range(nodes)]
-        # Validate transport identities before reserving the manifest or submitting.
-        for identity in identities:
-            identity.public_id()
-
         manifest.parent.mkdir(parents=True, exist_ok=True)
         with manifest.open("x") as output:
             output.write("{}\n")
@@ -311,7 +304,7 @@ def main(argv: list[str] | None = None) -> int:
         spec = prepare_spec(spec, Path.cwd(), args.script, groups, api)
         try:
             cluster = submit_cluster(
-                spec, identities, api=api, **options, on_submitted=partial(save_manifest, manifest)
+                spec, api=api, **options, on_submitted=partial(save_manifest, manifest)
             )
         except LaunchError as error:
             cluster = error.cluster

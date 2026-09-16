@@ -1,23 +1,19 @@
+import base64
+import json
 from unittest.mock import MagicMock
 
 import pytest
 from huggingface_hub import HfApi
 
-from hfdask.cluster import Cluster, Identity, LaunchError, WorkerGroup, submit_cluster
+from hfdask.cluster import Cluster, LaunchError, WorkerGroup, submit_cluster
 from hfdask.jobs import JobSpec
 
 
-def test_heterogeneous_groups(monkeypatch):
-    import json
-
-    monkeypatch.setattr(Identity, "public_id", lambda self: self.secret.hex())
+def test_heterogeneous_groups():
     api = MagicMock(spec=HfApi)
     api.run_job.return_value.id = "job"
-    keys = [Identity(bytes([i]) * 32) for i in range(6)]
     submit_cluster(
         JobSpec("example", "image", "workload:run"),
-        keys,
-        public_relays=True,
         worker_groups=[WorkerGroup("cpu-performance", 2), WorkerGroup("a100-large", 3)],
         api=api,
     )
@@ -30,7 +26,9 @@ def test_heterogeneous_groups(monkeypatch):
         "a100-large",
     ]
     command = api.run_job.call_args.kwargs["command"]
-    assert json.loads(command[command.index("--mesh") + 1])["hardware_detection"]
+    config = json.loads(command[command.index("--cluster") + 1])
+    assert config["job_nodes"] == 6
+    assert config["node_tags"] == [[], [], [], [], [], []]
 
 
 @pytest.mark.parametrize("colocated", [False, True])
@@ -43,15 +41,11 @@ def test_heterogeneous_groups(monkeypatch):
         ("cpu-basic", "cpu-performance", ["cpu-basic", "cpu-performance"]),
     ],
 )
-def test_hardware_overrides(monkeypatch, colocated, scheduler, worker, expected):
-    monkeypatch.setattr(Identity, "public_id", lambda self: self.secret.hex())
+def test_hardware_overrides(colocated, scheduler, worker, expected):
     api = MagicMock(spec=HfApi)
     api.run_job.return_value.id = "job"
-    keys = [Identity(bytes([i]) * 32) for i in range(3 - int(colocated))]
     submit_cluster(
         JobSpec("example", "image", "workload:run", flavor="cpu-upgrade"),
-        keys,
-        public_relays=True,
         scheduler_worker=colocated,
         scheduler_flavor=scheduler,
         worker_flavor=worker,
@@ -65,22 +59,16 @@ def test_hardware_overrides(monkeypatch, colocated, scheduler, worker, expected)
 def test_empty_hardware_rejected_before_submission(override):
     api = MagicMock(spec=HfApi)
     with pytest.raises(ValueError, match="flavor"):
-        submit_cluster(
-            JobSpec("example", "image", "workload:run"), [], public_relays=True, api=api, **override
-        )
+        submit_cluster(JobSpec("example", "image", "workload:run"), api=api, **override)
     api.run_job.assert_not_called()
 
 
 @pytest.mark.parametrize("workers", [1, 2])
-def test_scheduler_worker_reduces_jobs(monkeypatch, workers):
-    monkeypatch.setattr(Identity, "public_id", lambda self: self.secret.hex())
+def test_scheduler_worker_reduces_jobs(workers):
     api = MagicMock(spec=HfApi)
     api.run_job.return_value.id = "job"
-    keys = [Identity(bytes([i]) * 32) for i in range(workers)]
     cluster = submit_cluster(
         JobSpec("example", "image", "workload:run", workers=workers),
-        keys,
-        public_relays=True,
         scheduler_worker=True,
         api=api,
     )
@@ -89,39 +77,38 @@ def test_scheduler_worker_reduces_jobs(monkeypatch, workers):
         assert "--scheduler-worker" in call.kwargs["command"]
 
 
-def test_cluster_secrets_and_ownership(monkeypatch):
-    monkeypatch.setattr(Identity, "public_id", lambda self: self.secret.hex())
+def test_cluster_network_group_mtls_secrets_and_aliases():
     api = MagicMock(spec=HfApi)
     api.run_job.return_value.id = "job"
-    spec = JobSpec("example", "image", "workload:run", workers=2)
-    keys = [Identity(bytes([i]) * 32) for i in range(3)]
-    cluster = submit_cluster(spec, keys, public_relays=True, api=api)
+    cluster = submit_cluster(JobSpec("example", "image", "workload:run", workers=2), api=api)
     assert len(cluster.jobs) == 3
+    groups = {call.kwargs["network_group"] for call in api.run_job.call_args_list}
+    assert groups == {f"hfdask-{cluster.id}"}
+    certificates = set()
     for index, call in enumerate(api.run_job.call_args_list):
         kwargs = call.kwargs
-        assert kwargs["secrets"] == {"HFDASK_NODE_KEY": keys[index].secret.hex()}
-        assert not {"env", "expose", "ssh"}.intersection(kwargs)
+        assert kwargs["network_aliases"] == (
+            ["node-0", "scheduler"] if index == 0 else [f"node-{index}"]
+        )
+        assert kwargs["ssh"] is False
         assert kwargs["labels"]["hfdask-node"] == str(index)
-    assert "secret" not in str(cluster.manifest())
-    assert keys[0].secret.hex() not in repr(keys[0])
+        assert set(kwargs["secrets"]) == {
+            "HFDASK_TLS_CA",
+            "HFDASK_TLS_CERT",
+            "HFDASK_TLS_KEY",
+        }
+        decoded = base64.b64decode(kwargs["secrets"]["HFDASK_TLS_CERT"])
+        assert decoded.startswith(b"-----BEGIN CERTIFICATE-----")
+        certificates.add(decoded)
+    assert len(certificates) == 3
+    assert "PRIVATE KEY" not in json.dumps(cluster.manifest())
 
 
-def test_policy_is_explicit():
-    with pytest.raises(ValueError, match="Explicitly"):
-        submit_cluster(JobSpec("example", "image", "workload:run"), [])
-
-
-def test_partial_launch_retains_handles(monkeypatch):
-    monkeypatch.setattr(Identity, "public_id", lambda self: self.secret.hex())
+def test_partial_launch_retains_handles():
     api = MagicMock(spec=HfApi)
     api.run_job.side_effect = [MagicMock(id="first"), ConnectionError("uncertain")]
     with pytest.raises(LaunchError) as caught:
-        submit_cluster(
-            JobSpec("example", "image", "workload:run", workers=1),
-            [Identity(b"a" * 32), Identity(b"b" * 32)],
-            public_relays=True,
-            api=api,
-        )
+        submit_cluster(JobSpec("example", "image", "workload:run", workers=1), api=api)
     assert caught.value.cluster.jobs[0].id == "first"
     api.cancel_job.assert_not_called()
 

@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from distributed import Worker
 
-from .config import ServiceConfig, WorkerConfig, WorkerTopologyConfig
+from .config import WorkerConfig
 
 GIB = 1024**3
 
@@ -170,21 +170,6 @@ def worker_profiles(
             }
         )
     return profiles
-
-
-def service_owners(workers_per_node: tuple[int, ...]) -> list[int]:
-    """Map the scheduler plus each detected worker/nanny pair to its owning node."""
-    counts = WorkerTopologyConfig(workers_per_node=workers_per_node).workers_per_node
-    return [0, *(node for node, count in enumerate(counts) for _ in range(count * 2))]
-
-
-def worker_service(workers_per_node: tuple[int, ...], node: int, ordinal: int) -> int:
-    config = ServiceConfig(workers_per_node=workers_per_node, node=node, ordinal=ordinal)
-    return 1 + 2 * sum(config.workers_per_node[:node]) + ordinal * 2
-
-
-def nanny_service(workers_per_node: tuple[int, ...], node: int, ordinal: int) -> int:
-    return worker_service(workers_per_node, node, ordinal) + 1
 
 
 def worker_metadata(worker: Worker, *, profile: dict[str, Any]) -> dict[str, Any]:

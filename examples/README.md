@@ -50,8 +50,7 @@ GPUs. Submission reserves paid HF Jobs.
    in `cluster.yaml`.
 3. Create a private output bucket and seed a fresh prefix such as
    `hf://buckets/your-namespace/output/ag-news-run-001`; set it as `/output`.
-4. Review the `cpu-basic` and `l4x1` flavors, 30-minute timeout, and required
-   `network.public_relays: true` consent, then run:
+4. Review the `cpu-basic` and `l4x1` flavors and 30-minute timeout, then run:
 
    ```sh
    uv run --group inference hfdask run --cluster cluster.yaml job.py

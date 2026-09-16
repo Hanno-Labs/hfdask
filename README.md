@@ -2,8 +2,8 @@
 
 Run ordinary Dask programs across Hugging Face Jobs from one YAML cluster definition.
 hfdask ships the current Git working tree, starts a coordinator Job and worker Jobs,
-connects them through an authenticated encrypted mesh, and cleans up the paid Jobs
-when the program finishes.
+places them in one Hugging Face network group, authenticates every Dask connection
+with mTLS, and cleans up the paid Jobs when the program finishes.
 
 > **Status:** pre-release (`0.1.1`). APIs and configuration may change before the
 > first stable release.
@@ -29,8 +29,8 @@ when the program finishes. This lets us:
 - keep data transformation, inference, and aggregation in one program;
 - use native Hugging Face model, dataset, Space, and bucket mounts;
 - ship a locked project environment and the current Git working tree;
-- connect the cluster over an authenticated, encrypted mesh without exposing a
-  public Dask scheduler;
+- use HF network groups for private discovery and reachability while Dask mTLS
+  authenticates and encrypts scheduler, worker, and client traffic;
 - recover and clean up paid Jobs when a run fails or is interrupted.
 
 ```text
@@ -39,7 +39,7 @@ submitting machine
         │  source archive + Job definitions
         ▼
 coordinator HF Job                 worker HF Job(s)
-script + Dask scheduler  ◀─Iroh─▶  one Dask worker per CPU core
+script + Dask scheduler  ◀─mTLS─▶  one Dask worker per CPU core
 optional CPU workers               optional exclusive GPU assignments
 ```
 
@@ -67,8 +67,7 @@ the full CPU pool. The script imports Dask and pandas, not hfdask.
 
 1. Authenticate the submitting machine with `uv run --group deploy hf auth login`.
 2. Set your HF namespace in `cluster.yaml`.
-3. Review the two `cpu-basic` Jobs, the 15-minute timeout, and the public relay
-   consent, then run:
+3. Review the two `cpu-basic` Jobs and the 15-minute timeout, then run:
 
 ```sh
 uv run --group deploy hfdask run --cluster cluster.yaml cpu.py
@@ -96,7 +95,6 @@ The CLI reads a strict YAML definition before staging source or submitting Jobs:
 | `environment.groups` | Locked dependency groups installed in every Job |
 | `mounts` | Hub repositories or buckets mounted into every Job |
 | `timeout` | HF Job lifetime such as `15m` or `2h` |
-| `network.public_relays` | Explicit consent to public discovery and relay fallback |
 
 Unknown keys and coerced scalar types are rejected. Counts must be YAML integers,
 booleans must be YAML booleans, and `workers.count` must be between 1 and 63.
@@ -123,7 +121,8 @@ one-core coordinator therefore contributes no worker.
 Every worker has one Dask thread. Visible NVIDIA GPUs are assigned exclusively to
 the first worker processes, one GPU per process, while remaining processes are
 CPU-only. GPU discovery requires `nvidia-smi`; MIG partitions are not supported.
-Detected worker counts are exchanged before the mesh allocates Dask service ports.
+Each Job advertises its detected worker count through Dask metadata. The coordinator
+waits for the exact per-node topology before running the workload.
 
 Unannotated Dask tasks are eligible for every worker. Use ordinary Dask resources
 for numeric reservations such as `resources={"GPU": 1}`. For categorical placement,
@@ -202,20 +201,50 @@ Cluster.from_manifest(manifest).close()
 ```
 
 `Cluster.close()` cancels known Jobs and polls them to a terminal state. The
-manifest contains no private node keys, is not a workload checkpoint, and does not
+manifest contains no private credentials, is not a workload checkpoint, and does not
 resolve an ambiguous submission that returned no handle; reconcile those Jobs by
 their cluster labels before retrying.
 
+## Persistent clusters
+
+`hfdask.cluster.boot_cluster` creates a cluster without an embedded workload. It
+enables HF SSH only on the scheduler Job and returns a separate client mTLS identity.
+Save that identity outside the public recovery manifest, then reconnect through a
+loopback-only SSH port forward:
+
+```python
+from pathlib import Path
+
+from hfdask.client import connect
+from hfdask.cluster import boot_cluster
+from hfdask.jobs import JobSpec
+from hfdask.network import TLSCredentials
+
+cluster = boot_cluster(JobSpec("your-namespace", "your-image", workers=2))
+assert cluster.client_credentials is not None
+cluster.client_credentials.save(Path("client-credentials.json"))
+
+credentials = TLSCredentials.load(Path("client-credentials.json"))
+with connect(cluster.manifest(), credentials) as client:
+    print(client.submit(sum, [1, 2, 3]).result())
+```
+
+The SSH connection is authorized by the public keys registered on the HF account;
+the forwarded Dask connection independently requires the cluster's client
+certificate. Disconnecting does not stop the Jobs. Retain the recovery manifest and
+call `Cluster.close()` when the cluster is no longer needed.
+
 ## Security and limitations
 
-Iroh provides authenticated encrypted QUIC, NAT traversal, and relay transport.
-Dask services bind only to loopback, and each node admits identities from its fixed
-cluster roster. `network.public_relays: true` is required explicitly; discovery and
-relay services can observe connection metadata.
+HF network groups supply private routes and DNS aliases, not workload identity.
+hfdask creates a fresh certificate authority per cluster, sends each Job a distinct
+leaf certificate and private key through HF Job secrets, and discards the CA private
+key after issuance. Dask requires CA-authenticated TLS for scheduler, worker, nanny,
+embedded driver, and persistent-client connections. No Dask port is publicly exposed.
 
 Run only trusted workloads and images. Dask tasks execute arbitrary Python and can
 access their mounted data. HF credentials remain on the submitting machine; Jobs
-receive distinct Iroh keys through Job secrets.
+receive only their own mTLS identity through Job secrets.
 
 Job-local disks and scheduler state are ephemeral. Automatic whole-cluster resume
 is not implemented. Long workloads should write independently recoverable shards
@@ -251,11 +280,8 @@ mise run build
 ```
 
 CI runs formatting, Ruff, ty, the test suite, pdoc generation, and distribution
-builds on pull requests and pushes to `main`. The opt-in encrypted transport test is:
-
-```sh
-HFDASK_TEST_KEYS=1 uv run pytest tests/test_iroh_integration.py
-```
+builds on pull requests and pushes to `main`. The suite includes a real local Dask
+mTLS handshake and rejects clients signed by another cluster CA.
 
 ## License
 

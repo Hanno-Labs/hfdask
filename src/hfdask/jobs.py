@@ -63,12 +63,12 @@ class JobSpec:
         entrypoint: Importable `module:function` called with a Dask client as its first
             argument. Leave empty only for `hfdask.cluster.boot_cluster`.
         flavor: HF hardware flavor; also the default for multi-Job launch overrides.
-        workers: Worker-machine count for homogeneous mesh launches, including a
+        workers: Worker-machine count for homogeneous network-group launches, including a
             colocated scheduler worker if enabled. Single-Job submission detects
             local CPU cores instead. Explicit worker groups determine remote counts.
         threads_per_worker: Fixed at `1`; every usable CPU core gets one worker process.
         memory_limit: Dask memory limit, such as `"auto"` or `"1GiB"`. `"0"` disables
-            the local limit; hardware-budgeted mesh workers require a positive limit.
+            the local limit; hardware-budgeted distributed workers require a positive limit.
         timeout: Remote Job lifetime as a positive integer duration, such as `"1h"`.
         kwargs: JSON-serializable keyword arguments passed to the workload.
         volumes: HF volumes with absolute mount paths; grant only required access.

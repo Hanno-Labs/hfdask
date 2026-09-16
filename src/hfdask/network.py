@@ -1,359 +1,269 @@
-"""Authenticated Iroh QUIC links presented to Dask as loopback TCP peers.
-
-Encryption, peer identity verification, NAT traversal, and relay transport are
-provided by Iroh. This module only bridges bounded byte streams. Each remote
-identity can access only this node's registered Dask services, not arbitrary TCP.
-"""
+"""Hugging Face network-group addressing and per-cluster Dask mTLS credentials."""
 
 from __future__ import annotations
 
-import asyncio
-import errno
-import logging
-import resource
-from collections.abc import Coroutine, Sequence
-from typing import Any, Self
+import base64
+import json
+import os
+import re
+import tempfile
+from collections.abc import Iterator, Mapping, MutableMapping, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
-import iroh
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+from distributed.security import Security
 
-from .config import MeshConfig, WorkerTopologyConfig
-
-ALPN = b"hfdask/1"
-CHUNK_SIZE = 65536
-logger = logging.getLogger(__name__)
-
-
-def encode_worker_counts(workers_per_node: tuple[int, ...]) -> bytes:
-    counts = WorkerTopologyConfig(workers_per_node=workers_per_node).workers_per_node
-    if len(counts) > 65535 or any(count > 2**32 - 1 for count in counts):
-        raise ValueError("Worker topology is too large for the mesh protocol")
-    return len(counts).to_bytes(2, "big") + b"".join(count.to_bytes(4, "big") for count in counts)
-
-
-async def read_worker_counts(stream: iroh.BiStream) -> tuple[int, ...]:
-    size = int.from_bytes(await stream.recv().read_exact(2), "big")
-    if size == 0:
-        raise ConnectionError("Worker topology cannot be empty")
-    counts = []
-    for _ in range(size):
-        counts.append(int.from_bytes(await stream.recv().read_exact(4), "big"))
-    return WorkerTopologyConfig(workers_per_node=tuple(counts)).workers_per_node
+SCHEDULER_ALIAS = "scheduler"
+SCHEDULER_PORT = 8786
+WORKER_PORT_BASE = 10_000
+NANNY_PORT_BASE = 20_000
+_MAX_ORDINAL = 9_999
+_GROUP = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,44}[a-z0-9])?\Z")
+_ALIAS = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,32}[a-z0-9])?\Z")
+_SECRET_NAMES = ("HFDASK_TLS_CA", "HFDASK_TLS_CERT", "HFDASK_TLS_KEY")
 
 
-async def exchange_worker_counts(
-    endpoint: iroh.Endpoint,
-    peers: Sequence[iroh.EndpointAddr],
-    index: int,
-    local_count: int,
-    nodes: int,
-    timeout: float,
-) -> tuple[int, ...]:
-    """Exchange detected per-node worker counts before allocating mesh services."""
-    if not 0 <= index < nodes <= len(peers):
-        raise ValueError("Worker-count exchange does not match the Job roster")
-    encode_worker_counts((local_count,))
-    job_peers = peers[:nodes]
-    scheduler_id = job_peers[0].id().to_bytes()
-
-    async with asyncio.timeout(timeout):
-        if index:
-            connection = await endpoint.connect(job_peers[0], ALPN)
-            try:
-                require_expected_peer(connection.remote_id().to_bytes(), scheduler_id)
-                stream = await connection.open_bi()
-                await stream.send().write_all(b"W" + local_count.to_bytes(4, "big"))
-                if await stream.recv().read_exact(1) != b"K":
-                    raise ConnectionError("Scheduler rejected worker topology")
-                counts = await read_worker_counts(stream)
-                if len(counts) != nodes or counts[index] != local_count:
-                    raise ConnectionError("Scheduler returned inconsistent worker topology")
-                await stream.send().write_all(b"A")
-                await stream.send().finish()
-                return counts
-            finally:
-                connection.close(0, b"worker topology exchanged")
-
-        counts: list[int | None] = [local_count, *([None] * (nodes - 1))]
-        streams: list[iroh.BiStream] = []
-        connections: list[Any] = []
-        job_ids = {peer.id().to_bytes(): node for node, peer in enumerate(job_peers)}
-        try:
-            while any(count is None for count in counts):
-                incoming = await endpoint.accept_next()
-                if incoming is None:
-                    raise ConnectionError("Endpoint closed during worker-count exchange")
-                connection = await (await incoming.accept()).connect()
-                remote_id = connection.remote_id().to_bytes()
-                node = job_ids.get(remote_id)
-                if node in (None, 0) or counts[node] is not None:
-                    connection.close(1, b"unexpected worker topology reporter")
-                    continue
-                stream = await connection.accept_bi()
-                if await stream.recv().read_exact(1) != b"W":
-                    connection.close(1, b"invalid worker topology preamble")
-                    continue
-                counts[node] = int.from_bytes(await stream.recv().read_exact(4), "big")
-                streams.append(stream)
-                connections.append(connection)
-            result = tuple(count for count in counts if count is not None)
-            payload = encode_worker_counts(result)
-            for stream in streams:
-                await stream.send().write_all(b"K" + payload)
-                await stream.send().finish()
-                if await stream.recv().read_exact(1) != b"A":
-                    raise ConnectionError("Worker did not acknowledge topology")
-            return result
-        finally:
-            for connection in connections:
-                connection.close(0, b"worker topology exchanged")
+def network_group(cluster_id: str) -> str:
+    """Return a valid, unique HF network-group name for a cluster handle."""
+    value = f"hfdask-{cluster_id}"
+    if not _GROUP.fullmatch(value):
+        raise ValueError("Cluster ID cannot form a valid HF network-group name")
+    return value
 
 
-async def fetch_worker_counts(
-    endpoint: iroh.Endpoint, scheduler: iroh.EndpointAddr, timeout: float
-) -> tuple[int, ...]:
-    """Fetch the live worker topology when an external client joins later."""
-    async with asyncio.timeout(timeout):
-        connection = await endpoint.connect(scheduler, ALPN)
-        try:
-            require_expected_peer(connection.remote_id().to_bytes(), scheduler.id().to_bytes())
-            stream = await connection.open_bi()
-            await stream.send().write_all(b"C")
-            if await stream.recv().read_exact(1) != b"K":
-                raise ConnectionError("Scheduler did not provide worker topology")
-            counts = await read_worker_counts(stream)
-            await stream.send().write_all(b"A")
-            await stream.send().finish()
-            return counts
-        finally:
-            connection.close(0, b"worker topology fetched")
+def node_alias(node: int) -> str:
+    """Return the stable HF network alias claimed by one cluster Job."""
+    value = f"node-{node}"
+    if node < 0 or not _ALIAS.fullmatch(value):
+        raise ValueError("Node index cannot form a valid HF network alias")
+    return value
 
 
-def require_expected_peer(actual: bytes, expected: bytes) -> None:
-    if actual != expected:
-        raise PermissionError("Unexpected peer identity")
-
-
-def authorized(peer_id: bytes, roster: Sequence[bytes]) -> bool:
-    return peer_id in roster
-
-
-async def bridge(
-    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, stream: iroh.BiStream
-) -> None:
-    """Preserve backpressure and half-close; never buffer the whole payload."""
-
-    async def upload() -> None:
-        while data := await reader.read(CHUNK_SIZE):
-            await stream.send().write_all(data)
-        await stream.send().finish()
-        await stream.send().stopped()
-
-    async def download() -> None:
-        while data := await stream.recv().read(CHUNK_SIZE):
-            writer.write(data)
-            await writer.drain()
-        if writer.can_write_eof():
-            try:
-                writer.write_eof()
-            except OSError as error:
-                if error.errno not in {errno.ECONNRESET, errno.ENOTCONN, errno.EPIPE}:
-                    raise
-
-    tasks = [asyncio.create_task(upload()), asyncio.create_task(download())]
+def network_hostname(alias: str, environment: Mapping[str, str] | None = None) -> str:
+    """Resolve an alias to the hostname convention injected by HF Jobs."""
+    if not _ALIAS.fullmatch(alias):
+        raise ValueError("Invalid HF network alias")
+    values = os.environ if environment is None else environment
     try:
-        await asyncio.gather(*tasks)
-    finally:
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        writer.close()
-        await writer.wait_closed()
+        prefix = values["HF_NETWORK_GROUP_PREFIX"]
+    except KeyError as error:
+        raise RuntimeError(
+            "HF_NETWORK_GROUP_PREFIX is unavailable outside a network group"
+        ) from error
+    if not prefix:
+        raise RuntimeError("HF_NETWORK_GROUP_PREFIX must be nonempty")
+    return f"{prefix}{alias}"
 
 
-class Mesh:
-    """One owned endpoint per job, with identical peer-port aliases on each job.
+def scheduler_address(environment: Mapping[str, str] | None = None) -> str:
+    """Return the network-group address used by every Dask worker."""
+    return f"tls://{network_hostname(SCHEDULER_ALIAS, environment)}:{SCHEDULER_PORT}"
 
-    Dask on peer i listens/advertises 127.0.0.1:(base_port+i). On all other
-    machines that address is a proxy to peer i's authenticated Iroh endpoint.
-    The caller owns endpoint creation and its key/relay policy.
-    Optional services maps consecutive port offsets to owning node indices,
-    allowing a node to host both scheduler and worker without sharing listeners.
-    """
 
-    def __init__(
-        self,
-        endpoint: iroh.Endpoint,
-        peers: Sequence[iroh.EndpointAddr],
-        index: int,
-        *,
-        base_port: int = 21000,
-        max_connections: int = 256,
-        bind_host: str = "127.0.0.1",
-        services: Sequence[int] | None = None,
-        workers_per_node: tuple[int, ...] | None = None,
-    ) -> None:
-        owners = tuple(range(len(peers))) if services is None else tuple(services)
-        ids = [peer.id().to_bytes() for peer in peers]
-        MeshConfig(
-            index=index,
-            base_port=base_port,
-            max_connections=max_connections,
-            bind_host=bind_host,
-            services=owners,
-            peers=tuple(ids),
-            endpoint_id=endpoint.id().to_bytes(),
-        )
-        self.endpoint = endpoint
-        self.peers = tuple(peers)
-        self.ids = ids
-        self.index = index
-        self.base_port = base_port
-        self.max_connections = max_connections
-        self.bind_host = bind_host
-        self.services = owners
-        self.workers_per_node = (
-            None
-            if workers_per_node is None
-            else WorkerTopologyConfig(workers_per_node=workers_per_node).workers_per_node
-        )
-        self.servers: list[asyncio.Server] = []
-        self.tasks: set[asyncio.Task[None]] = set()
-        self.accept_task: asyncio.Task[None] | None = None
+def worker_port(ordinal: int) -> int:
+    if not 0 <= ordinal <= _MAX_ORDINAL:
+        raise ValueError("Worker ordinal is outside the reserved port range")
+    return WORKER_PORT_BASE + ordinal
 
-    def spawn(self, coroutine: Coroutine[Any, Any, None]) -> None:
-        task = asyncio.create_task(coroutine)
-        self.tasks.add(task)
 
-        def finished(done: asyncio.Task[None]) -> None:
-            self.tasks.discard(done)
-            if not done.cancelled() and (error := done.exception()) is not None:
-                logger.warning(
-                    "mesh stream failed: %s",
-                    error,
-                    exc_info=(type(error), error, error.__traceback__),
-                )
+def nanny_port(ordinal: int) -> int:
+    if not 0 <= ordinal <= _MAX_ORDINAL:
+        raise ValueError("Worker ordinal is outside the reserved port range")
+    return NANNY_PORT_BASE + ordinal
 
-        task.add_done_callback(finished)
 
-    def require_file_descriptor_budget(self) -> None:
-        proxy_count = sum(owner != self.index for owner in self.services)
-        required = proxy_count + 2 * self.max_connections + 64
-        soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
-        if soft_limit == resource.RLIM_INFINITY or soft_limit >= required:
-            return
-        if hard_limit != resource.RLIM_INFINITY and hard_limit < required:
-            raise RuntimeError("File descriptor hard limit is too low for the configured mesh")
+@dataclass(frozen=True)
+class TLSCredentials:
+    """One CA-trusted Dask identity, kept out of manifests and representations."""
+
+    ca_certificate: str = field(repr=False)
+    certificate: str = field(repr=False)
+    private_key: str = field(repr=False)
+
+    def __post_init__(self) -> None:
+        ca = x509.load_pem_x509_certificate(self.ca_certificate.encode())
+        certificate = x509.load_pem_x509_certificate(self.certificate.encode())
+        key = serialization.load_pem_private_key(self.private_key.encode(), password=None)
+        if not ca.extensions.get_extension_for_class(x509.BasicConstraints).value.ca:
+            raise ValueError("TLS CA certificate is not a certificate authority")
+        if certificate.issuer != ca.subject:
+            raise ValueError("TLS certificate was not issued by the supplied CA")
+        certificate.verify_directly_issued_by(ca)
+        public_format = {
+            "encoding": serialization.Encoding.DER,
+            "format": serialization.PublicFormat.SubjectPublicKeyInfo,
+        }
+        if certificate.public_key().public_bytes(**public_format) != key.public_key().public_bytes(
+            **public_format
+        ):
+            raise ValueError("TLS private key does not match its certificate")
+
+    def job_secrets(self) -> dict[str, str]:
+        """Encode PEM values safely for HF Job secret environment variables."""
+        values = (self.ca_certificate, self.certificate, self.private_key)
+        return {
+            name: base64.b64encode(value.encode()).decode()
+            for name, value in zip(_SECRET_NAMES, values, strict=True)
+        }
+
+    def save(self, path: Path) -> None:
+        """Create a mode-0600 JSON credential file for later persistent connections."""
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
-            resource.setrlimit(resource.RLIMIT_NOFILE, (required, hard_limit))
-        except (OSError, ValueError) as error:
-            raise RuntimeError(
-                "Could not raise the file descriptor limit for the configured mesh"
-            ) from error
-
-    def require_owned_service(self, service: int) -> None:
-        if not 0 <= service < len(self.services) or self.services[service] != self.index:
-            raise PermissionError("Service is not owned by this node")
-
-    async def __aenter__(self) -> Self:
-        self.require_file_descriptor_budget()
-        try:
-            for index, owner in enumerate(self.services):
-                if owner == self.index:
-                    continue
-
-                def accepted(
-                    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, target: int = index
-                ) -> None:
-                    if len(self.tasks) >= self.max_connections:
-                        writer.close()
-                    else:
-                        self.spawn(self.outgoing(target, reader, writer))
-
-                self.servers.append(
-                    await asyncio.start_server(accepted, self.bind_host, self.base_port + index)
+            with os.fdopen(descriptor, "w") as output:
+                json.dump(
+                    {
+                        "ca_certificate": self.ca_certificate,
+                        "certificate": self.certificate,
+                        "private_key": self.private_key,
+                    },
+                    output,
                 )
-            self.accept_task = asyncio.create_task(self.accept())
-            return self
+                output.write("\n")
+                output.flush()
+                os.fsync(output.fileno())
         except BaseException:
-            await self.close()
+            path.unlink(missing_ok=True)
             raise
 
-    async def outgoing(
-        self, index: int, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
-        connection = None
+    @classmethod
+    def load(cls, path: Path) -> TLSCredentials:
+        """Load a client identity only when no group or other permissions expose it."""
+        if path.stat().st_mode & 0o077:
+            raise PermissionError("TLS credential file must not be accessible by group or others")
+        payload = json.loads(path.read_text())
+        if not isinstance(payload, dict):
+            raise ValueError("TLS credential file must contain a JSON object")
         try:
-            async with asyncio.timeout(30):
-                owner = self.services[index]
-                connection = await self.endpoint.connect(self.peers[owner], ALPN)
-                require_expected_peer(connection.remote_id().to_bytes(), self.ids[owner])
-                stream = await connection.open_bi()
-                await stream.send().write_all(b"D" + index.to_bytes(2, "big"))
-                if await stream.recv().read_exact(1) != b"K":
-                    raise ConnectionError("Peer did not open its Dask listener")
-            logger.debug("mesh link authenticated node=%s target=%s", self.index, index)
-            await bridge(reader, writer, stream)
-        finally:
-            writer.close()
-            await writer.wait_closed()
-            if connection is not None:
-                connection.close(0, b"stream closed")
+            return cls(
+                payload["ca_certificate"],
+                payload["certificate"],
+                payload["private_key"],
+            )
+        except KeyError as error:
+            raise ValueError("TLS credential file is incomplete") from error
 
-    async def accept(self) -> None:
-        while incoming := await self.endpoint.accept_next():
-            if len(self.tasks) >= self.max_connections:
-                await incoming.refuse()
-            else:
-                self.spawn(self.incoming(incoming))
-
-    async def incoming(self, incoming: iroh.Incoming) -> None:
-        connection = None
-        try:
-            async with asyncio.timeout(30):
-                connection = await (await incoming.accept()).connect()
-                if not authorized(connection.remote_id().to_bytes(), self.ids):
-                    connection.close(1, b"not a cluster member")
-                    return
-                stream = await connection.accept_bi()
-                preamble = await stream.recv().read_exact(1)
-                if preamble == b"C":
-                    if self.workers_per_node is None:
-                        raise ConnectionError("Worker topology is unavailable")
-                    await stream.send().write_all(
-                        b"K" + encode_worker_counts(self.workers_per_node)
-                    )
-                    await stream.send().finish()
-                    if await stream.recv().read_exact(1) != b"A":
-                        raise ConnectionError("Client did not acknowledge worker topology")
-                    return
-                if preamble != b"D":
-                    raise ConnectionError("Invalid stream preamble")
-                service = int.from_bytes(await stream.recv().read_exact(2), "big")
-                self.require_owned_service(service)
-                reader, writer = await asyncio.open_connection(
-                    self.bind_host, self.base_port + service
-                )
+    @classmethod
+    def from_environment(
+        cls, environment: MutableMapping[str, str] | None = None
+    ) -> TLSCredentials:
+        """Consume a Job's encoded credentials so child processes only receive file paths."""
+        values = os.environ if environment is None else environment
+        decoded = []
+        for name in _SECRET_NAMES:
             try:
-                await stream.send().write_all(b"K")
-                await bridge(reader, writer, stream)
-            finally:
-                writer.close()
-                await writer.wait_closed()
-        finally:
-            if connection is not None:
-                connection.close(0, b"stream closed")
+                encoded = values.pop(name)
+            except KeyError as error:
+                raise RuntimeError(f"Missing Job secret: {name}") from error
+            try:
+                decoded.append(base64.b64decode(encoded, validate=True).decode())
+            except (ValueError, UnicodeDecodeError) as error:
+                raise ValueError(f"Invalid Job secret: {name}") from error
+        return cls(*decoded)
 
-    async def close(self) -> None:
-        for server in self.servers:
-            server.close()
-        await asyncio.gather(*(server.wait_closed() for server in self.servers))
-        if self.accept_task is not None:
-            self.accept_task.cancel()
-            await asyncio.gather(self.accept_task, return_exceptions=True)
-        tasks = list(self.tasks)
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+    @contextmanager
+    def security(self) -> Iterator[Security]:
+        """Materialize private files for Dask, then remove them on context exit."""
+        with tempfile.TemporaryDirectory(prefix="hfdask-tls-") as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            ca_path = root / "ca.pem"
+            cert_path = root / "identity.pem"
+            key_path = root / "identity.key"
+            ca_path.write_text(self.ca_certificate)
+            cert_path.write_text(self.certificate)
+            key_path.write_text(self.private_key)
+            ca_path.chmod(0o600)
+            cert_path.chmod(0o600)
+            key_path.chmod(0o600)
+            yield Security(
+                require_encryption=True,
+                tls_ca_file=str(ca_path),
+                tls_client_cert=str(cert_path),
+                tls_client_key=str(key_path),
+                tls_scheduler_cert=str(cert_path),
+                tls_scheduler_key=str(key_path),
+                tls_worker_cert=str(cert_path),
+                tls_worker_key=str(key_path),
+            )
 
-    async def __aexit__(self, *args: object) -> None:
-        await self.close()
+
+def issue_credentials(
+    job_names: Sequence[str], *, client_name: str | None = None
+) -> tuple[tuple[TLSCredentials, ...], TLSCredentials | None]:
+    """Create an ephemeral cluster CA and one distinct leaf identity per principal."""
+    if not job_names or len(set(job_names)) != len(job_names):
+        raise ValueError("Every Job needs a distinct TLS identity")
+    names = [*job_names, *([client_name] if client_name is not None else [])]
+    if len(set(names)) != len(names) or any(not name for name in names):
+        raise ValueError("Every Job and client needs a distinct nonempty TLS identity")
+
+    now = datetime.now(UTC)
+    ca_key = ec.generate_private_key(ec.SECP256R1())
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "hfdask ephemeral CA")])
+    ca = (
+        x509.CertificateBuilder()
+        .subject_name(ca_name)
+        .issuer_name(ca_name)
+        .public_key(ca_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=5))
+        .not_valid_after(now + timedelta(days=365))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .sign(ca_key, hashes.SHA256())
+    )
+    ca_pem = ca.public_bytes(serialization.Encoding.PEM).decode()
+
+    def issue(name: str) -> TLSCredentials:
+        key = ec.generate_private_key(ec.SECP256R1())
+        subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)])
+        certificate = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(ca.subject)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(minutes=5))
+            .not_valid_after(now + timedelta(days=365))
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(
+                x509.ExtendedKeyUsage(
+                    [ExtendedKeyUsageOID.CLIENT_AUTH, ExtendedKeyUsageOID.SERVER_AUTH]
+                ),
+                critical=False,
+            )
+            .sign(ca_key, hashes.SHA256())
+        )
+        return TLSCredentials(
+            ca_pem,
+            certificate.public_bytes(serialization.Encoding.PEM).decode(),
+            key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            ).decode(),
+        )
+
+    issued = tuple(issue(name) for name in names)
+    job_count = len(job_names)
+    return issued[:job_count], issued[job_count] if client_name is not None else None

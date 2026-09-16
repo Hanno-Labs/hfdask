@@ -12,7 +12,7 @@ import pytest
 from pydantic import ValidationError
 
 from hfdask import bootstrap, cli
-from hfdask.cluster import Cluster, Identity, LaunchError, submit_cluster
+from hfdask.cluster import Cluster, LaunchError, submit_cluster
 from hfdask.jobs import JobSpec, submit
 
 
@@ -31,7 +31,7 @@ def project(tmp_path, monkeypatch):
         "namespace: example\ncoordinator:\n  flavor: cpu-basic\n"
         "workers:\n  flavor: h200\n  count: 4\nenvironment:\n"
         "  image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim\n"
-        "  groups: [inference]\ntimeout: 2h\nnetwork:\n  public_relays: true\n"
+        "  groups: [inference]\ntimeout: 2h\n"
         "mounts:\n  - source: hf://buckets/example/data\n"
         "    target: /data\n    read_only: true\n"
     )
@@ -53,7 +53,6 @@ def test_yaml_contract(project):
     assert spec.volumes[0].source == "example/data"
     assert spec.volumes[0].read_only is True
     assert options == {
-        "public_relays": True,
         "scheduler_worker": False,
         "scheduler_flavor": "cpu-basic",
     }
@@ -306,14 +305,14 @@ def test_cpu_example_is_unannotated_dataframe_cluster():
     assert "dask.annotate" not in source
 
 
-def test_explicit_relay_consent(project):
+def test_removed_network_configuration_is_rejected(project):
     path = project / "inference.yaml"
-    path.write_text(path.read_text().replace("public_relays: true", "public_relays: false"))
-    with pytest.raises(ValueError, match="Explicitly"):
+    path.write_text(path.read_text() + "network:\n  public_relays: true\n")
+    with pytest.raises(ValueError, match="network"):
         cli.load_cluster(path, project, "job.py")
 
 
-def test_bootstrap_forwards_appended_mesh_arguments(project, monkeypatch, capsys):
+def test_bootstrap_forwards_appended_cluster_arguments(project, monkeypatch, capsys):
 
     (project / "large.lock").write_bytes(random.Random(0).randbytes(100_000))
     spec, _, _, groups = cli.load_cluster(project / "inference.yaml", project, "job.py")
@@ -332,7 +331,7 @@ def test_bootstrap_forwards_appended_mesh_arguments(project, monkeypatch, capsys
             "-m",
             "hfdask.runner",
             "hfdask.runner:run_script",
-            "--mesh",
+            "--cluster",
             "{}",
             "--node",
             "2",
@@ -361,7 +360,7 @@ def test_bootstrap_forwards_appended_mesh_arguments(project, monkeypatch, capsys
         "-m",
         "hfdask.runner",
         "hfdask.runner:run_script",
-        "--mesh",
+        "--cluster",
         "{}",
         "--node",
         "2",
@@ -379,11 +378,10 @@ def test_bootstrap_forwards_appended_mesh_arguments(project, monkeypatch, capsys
 def test_lifecycle(project, monkeypatch, failure):
     cluster = MagicMock()
     cluster.manifest.return_value = {"cluster_id": "public-id", "jobs": [{"id": "job1"}]}
-    monkeypatch.setattr(Identity, "public_id", lambda self: "public")
     captured = {}
 
-    def launch(spec, identities, **options):
-        captured.update(spec=spec, identities=identities, options=options)
+    def launch(spec, **options):
+        captured.update(spec=spec, options=options)
         options["on_submitted"](cluster)
         assert json.loads(Path("manifest.json").read_text()) == cluster.manifest()
         if failure == "launch":
@@ -402,8 +400,6 @@ def test_lifecycle(project, monkeypatch, failure):
     assert captured["options"]["api"] is cli.HfApi()
     assert "groups" not in captured["options"]
     cli.HfApi().batch_bucket_files.assert_called_once()
-    assert len(captured["identities"]) == 5
-    assert len({identity.secret for identity in captured["identities"]}) == 5
     if failure:
         cluster.close.assert_called_once()
     else:
@@ -420,7 +416,6 @@ def test_cli_coordinator_worker_submission(project, monkeypatch, worker):
             "  flavor: cpu-basic", f"  flavor: cpu-basic\n  worker: {str(worker).lower()}"
         )
     path.write_text(text)
-    monkeypatch.setattr(Identity, "public_id", lambda self: self.secret.hex())
     monkeypatch.setattr(Cluster, "wait", MagicMock())
     api = cli.HfApi()
     api.run_job.return_value.id = "job1"
@@ -437,10 +432,10 @@ def test_cli_coordinator_worker_submission(project, monkeypatch, worker):
         assert ("--scheduler-worker" in command) is (worker is True)
         assert command[command.index("--node") + 1] == str(node)
         assert command[command.index("--workers") + 1] == str(1 + int(worker is True))
-        mesh = json.loads(command[command.index("--mesh") + 1])
-        assert len(mesh["peers"]) == 2
-        assert mesh["node_flavors"] == ["cpu-basic", "h200"]
-        assert mesh["hardware_detection"] is True
+        config = json.loads(command[command.index("--cluster") + 1])
+        assert config["job_nodes"] == 2
+        assert config["node_flavors"] == ["cpu-basic", "h200"]
+        assert config["schema"] == 2
 
 
 def test_submission_propagates_environment_and_wrapper(monkeypatch):
@@ -457,8 +452,7 @@ def test_submission_propagates_environment_and_wrapper(monkeypatch):
     submit(spec, api=api)
     assert api.run_job.call_args.kwargs["env"] == spec.env
     assert api.run_job.call_args.kwargs["command"][0] == "wrapper"
-    monkeypatch.setattr(Identity, "public_id", lambda self: self.secret.hex())
-    submit_cluster(spec, [Identity(b"a" * 32), Identity(b"b" * 32)], api=api, public_relays=True)
+    submit_cluster(spec, api=api)
     args = api.run_job.call_args.kwargs
     assert args["env"] == spec.env
     assert args["command"][0] == "wrapper"
@@ -468,7 +462,6 @@ def test_submission_propagates_environment_and_wrapper(monkeypatch):
 def test_interrupt_submission_retains_known_jobs(monkeypatch):
     api = MagicMock()
     api.run_job.return_value.id = "known"
-    monkeypatch.setattr(Identity, "public_id", lambda self: self.secret.hex())
 
     def interrupt(cluster):
         raise KeyboardInterrupt()
@@ -476,9 +469,7 @@ def test_interrupt_submission_retains_known_jobs(monkeypatch):
     with pytest.raises(LaunchError) as raised:
         submit_cluster(
             JobSpec(namespace="example", image="stock", entrypoint="module:run", workers=1),
-            [Identity(b"a" * 32), Identity(b"b" * 32)],
             api=api,
-            public_relays=True,
             on_submitted=interrupt,
         )
     assert isinstance(raised.value.__cause__, KeyboardInterrupt)
@@ -615,7 +606,6 @@ def test_staging_fails_closed_for_unverified_privacy(project, monkeypatch, priva
     api.bucket_info.return_value.private = privacy
     launch = MagicMock()
     monkeypatch.setattr(cli, "submit_cluster", launch)
-    monkeypatch.setattr(Identity, "public_id", lambda self: "public")
     assert cli.main(["run", "--cluster", "inference.yaml", "job.py"]) == 1
     api.batch_bucket_files.assert_not_called()
     launch.assert_not_called()
@@ -627,7 +617,6 @@ def test_staging_api_failure_never_submits(project, monkeypatch, operation):
     getattr(api, operation).side_effect = RuntimeError("staging failed")
     launch = MagicMock()
     monkeypatch.setattr(cli, "submit_cluster", launch)
-    monkeypatch.setattr(Identity, "public_id", lambda self: "public")
     assert cli.main(["run", "--cluster", "inference.yaml", "job.py"]) == 1
     launch.assert_not_called()
     if operation != "batch_bucket_files":
@@ -655,7 +644,6 @@ def test_mount_cannot_overlap_bootstrap_paths(project, target):
 def test_submission_cause_logging_is_preserved(project, monkeypatch, capsys):
     cluster = MagicMock()
     cluster.manifest.return_value = {"cluster_id": "public", "jobs": []}
-    monkeypatch.setattr(Identity, "public_id", lambda self: "public")
 
     def launch(*args, **kwargs):
         raise LaunchError(cluster) from RuntimeError("HF413 body too large")
