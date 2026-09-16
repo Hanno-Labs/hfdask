@@ -155,6 +155,7 @@ def connect(
             security=security,
             timeout=timeout,
             set_as_default=False,
+            direct_to_workers=False,
         ) as client,
     ):
         wait_published_topology(client, connection.job_nodes, timeout)

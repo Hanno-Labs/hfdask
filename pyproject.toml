@@ -12,15 +12,12 @@ license = "Apache-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
-    "huggingface-hub>=1.32.0.dev0,<2",
+    "huggingface-hub @ git+https://github.com/huggingface/huggingface_hub.git@a2af2e0c12d9e11368a02cba55ae239f2ecf5614",
     "dask[distributed]>=2025.1,<2027",
     "cryptography>=45,<51",
     "PyYAML>=6,<7",
     "pydantic>=2.12,<3",
 ]
-
-[tool.uv.sources]
-huggingface-hub = { git = "https://github.com/huggingface/huggingface_hub.git", rev = "a2af2e0c12d9e11368a02cba55ae239f2ecf5614" }
 
 [project.urls]
 Homepage = "https://github.com/Hanno-Labs/hfdask"
@@ -30,6 +27,9 @@ Issues = "https://github.com/Hanno-Labs/hfdask/issues"
 [project.scripts]
 hfdask = "hfdask.cli:main"
 hfdask-runner = "hfdask.runner:main"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [dependency-groups]
 docs = ["pdoc>=15"]

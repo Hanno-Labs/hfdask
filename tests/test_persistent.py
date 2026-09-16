@@ -110,6 +110,7 @@ def test_client_connect_disconnect_keeps_scheduler(monkeypatch):
                     local_port=port,
                     api=MagicMock(spec=HfApi),
                 ) as client:
+                    assert client.direct_to_workers is False
                     assert client.submit(abs, -17).result() == 17
             with Client(
                 cluster.scheduler_address,
