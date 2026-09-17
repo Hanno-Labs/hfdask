@@ -12,7 +12,7 @@ license = "Apache-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
-    "huggingface-hub @ git+https://github.com/huggingface/huggingface_hub.git@a2af2e0c12d9e11368a02cba55ae239f2ecf5614",
+    "huggingface-hub>=1.32,<2",
     "dask[distributed]>=2025.1,<2027",
     "cryptography>=45,<51",
     "PyYAML>=6,<7",
