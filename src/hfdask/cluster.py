@@ -1,4 +1,4 @@
-"""Multi-job submission with an explicit Iroh relay policy and node identities."""
+"""Multi-Job submission over HF network groups with per-cluster Dask mTLS."""
 
 from __future__ import annotations
 
@@ -20,9 +20,15 @@ from .config import (
     PositiveCount,
     Text,
     WaitConfig,
-    require_distinct_identities,
 )
 from .jobs import TERMINAL, Job, JobFailed, JobSpec
+from .network import (
+    SCHEDULER_ALIAS,
+    TLSCredentials,
+    issue_credentials,
+    network_group,
+    node_alias,
+)
 
 
 def require_custom_tag(value: str) -> str:
@@ -55,33 +61,11 @@ class WorkerGroup:
     tags: tuple[CustomTag, ...] = ()
 
 
-@validated_dataclass(frozen=True, config=CONFIG)
-class Identity:
-    """A caller-provided Iroh identity; never serialize its secret into a manifest.
-
-    Args:
-        secret: Exactly 32 private bytes. Generate independently for each Job and
-            persistent client, for example with `secrets.token_bytes(32)`.
-
-    Keep persistent client keys separately from public recovery manifests. Job
-    keys are passed through HF Job secrets, not ordinary environment configuration.
-    """
-
-    secret: Annotated[bytes, Field(min_length=32, max_length=32)] = field(repr=False)
-
-    def public_id(self) -> str:
-        """Derive the public endpoint ID as hexadecimal without exposing the secret."""
-        import iroh
-
-        return iroh.SecretKey.from_bytes(self.secret).public().to_bytes().hex()
-
-
 class LaunchPlan(LaunchConfig):
     """Validated launch inputs and their resolved topology, before any submission."""
 
     spec: JobSpec
-    identities: tuple[Identity, ...] = Field(repr=False, exclude=True)
-    client_identity: Identity | None = Field(default=None, repr=False, exclude=True)
+    persistent: bool = False
     worker_groups: Annotated[tuple[WorkerGroup, ...], Field(min_length=1)] | None = None
 
     @model_validator(mode="after")
@@ -98,19 +82,8 @@ class LaunchPlan(LaunchConfig):
         return self
 
     @model_validator(mode="after")
-    def require_identity_per_job(self) -> Self:
-        if len(self.identities) != self.node_count:
-            raise ValueError("Provide one identity per Job")
-        return self
-
-    @model_validator(mode="after")
-    def require_distinct_job_and_client_identities(self) -> Self:
-        require_distinct_identities(tuple(self.peers))
-        return self
-
-    @model_validator(mode="after")
     def require_workload_for_launch_mode(self) -> Self:
-        if self.client_identity is not None:
+        if self.persistent:
             PersistentWorkloadConfig(entrypoint=self.spec.entrypoint, kwargs=self.spec.kwargs)
         else:
             self.spec.command()
@@ -135,42 +108,25 @@ class LaunchPlan(LaunchConfig):
         return [self.scheduler_flavor or self.spec.flavor, *remote]
 
     @property
-    def peers(self) -> list[str]:
-        identities = self.identities + ((self.client_identity,) if self.client_identity else ())
-        return [identity.public_id() for identity in identities]
-
-    @property
     def connection(self) -> dict[str, Any]:
         tags = (
             [list(group.tags) for group in self.worker_groups for _ in range(group.count)]
             if self.worker_groups is not None
             else [[] for _ in self.node_flavors[1:]]
         )
-        config = {
-            "peers": self.peers,
-            "relays": self.relays,
-            "public_relays": self.public_relays,
+        return {
+            "schema": 2,
+            "persistent": self.persistent,
+            "job_nodes": self.node_count,
+            "scheduler_worker": self.scheduler_worker,
             "startup_timeout": self.startup_timeout,
             "node_flavors": self.node_flavors,
             "node_tags": [[], *tags],
-            "hardware_detection": True,
         }
-        if self.client_identity is not None:
-            config.update(
-                schema=1,
-                persistent=True,
-                job_nodes=len(self.node_flavors),
-                scheduler_worker=self.scheduler_worker,
-            )
-        return config
 
     @property
     def command(self) -> list[str]:
-        spec = (
-            replace(self.spec, entrypoint="hfdask.runner:main")
-            if self.client_identity is not None
-            else self.spec
-        )
+        spec = replace(self.spec, entrypoint="hfdask.runner:main") if self.persistent else self.spec
         return spec.command()
 
 
@@ -182,6 +138,8 @@ class Cluster:
         id: Cluster label used to reconcile Jobs after ambiguous submissions.
         jobs: Known handles in launch order, scheduler first; may be a partial launch.
         connection: Public connection configuration for persistent clusters, otherwise `None`.
+        client_credentials: Private mTLS identity for a persistent client. It is never
+            serialized into `manifest`; save it separately before losing this process.
 
     Save `manifest` after each submission when recovery matters. A manifest has no
     private keys and is neither a task checkpoint nor sufficient client credentials.
@@ -190,6 +148,7 @@ class Cluster:
     id: str
     jobs: list[Job]
     connection: dict[str, Any] | None = None
+    client_credentials: TLSCredentials | None = field(default=None, repr=False)
 
     def manifest(self) -> dict[str, Any]:
         """Return JSON-serializable recovery handles and any public connection metadata."""
@@ -318,10 +277,7 @@ class LaunchError(RuntimeError):
 
 def submit_cluster(
     spec: JobSpec,
-    identities: Sequence[Identity],
     *,
-    public_relays: bool = False,
-    relay_urls: Sequence[str] = (),
     startup_timeout: int = 1200,
     scheduler_worker: bool = False,
     scheduler_flavor: str | None = None,
@@ -329,17 +285,13 @@ def submit_cluster(
     worker_groups: Sequence[WorkerGroup] | None = None,
     api: HfApi | None = None,
     on_submitted: Callable[[Cluster], None] | None = None,
-    _client_identity: Identity | None = None,
+    _persistent: bool = False,
 ) -> Cluster:
     """Launch a batch driver and worker machines as separate paid HF Jobs.
 
     Args:
         spec: Workload specification. Without explicit groups, `spec.workers` counts
             worker machines, including a colocated scheduler worker if enabled.
-        identities: One distinct identity per Job, in scheduler-first order; at most
-            64 Jobs. These keys are supplied by the caller, not generated here.
-        public_relays: Required explicit consent to public n0 discovery and relay use.
-        relay_urls: Optional custom relay URLs; these still use n0 discovery.
         startup_timeout: Positive worker-readiness timeout in seconds.
         scheduler_worker: Also run workers on the scheduler Job's hardware.
         scheduler_flavor: Scheduler hardware override; defaults to `spec.flavor`.
@@ -354,47 +306,57 @@ def submit_cluster(
         Known Job handles without waiting for readiness or workload completion.
 
     Raises:
-        ValueError: If launch configuration, identity roster, or workload is invalid.
+        ValueError: If launch configuration or workload is invalid.
         LaunchError: If submission or its callback fails, including interruption;
             the exception retains the partial cluster for recovery.
 
-    Each image must contain hfdask and the workload, or bootstrap them. No HF ports
-    are exposed. One GPU machine may host multiple Dask worker processes. Never
-    retry an ambiguous submission blindly; no automatic rollback is performed.
+    Each image must contain hfdask and the workload, or bootstrap them. Every Job
+    joins one unique HF network group and receives a distinct CA-signed Dask identity.
+    No public Dask ports are exposed. Never retry an ambiguous submission blindly;
+    no automatic rollback is performed.
     """
     plan = LaunchPlan(
         spec=spec,
-        identities=tuple(identities),
-        client_identity=_client_identity,
+        persistent=_persistent,
         scheduler_flavor=scheduler_flavor,
         worker_flavor=worker_flavor,
         worker_groups=None if worker_groups is None else tuple(worker_groups),
-        public_relays=public_relays,
-        relays=list(relay_urls),
         startup_timeout=startup_timeout,
         scheduler_worker=scheduler_worker,
     )
     client = api if api is not None else HfApi()
     cluster = Cluster(uuid4().hex, [])
     config = plan.connection
-    if plan.client_identity is not None:
+    credentials, client_credentials = issue_credentials(
+        [node_alias(index) for index in range(plan.node_count)],
+        client_name="client" if plan.persistent else None,
+    )
+    if plan.persistent:
         cluster.connection = config
+        cluster.client_credentials = client_credentials
     configuration = json.dumps(config)
     command = plan.command
     environment_kwargs: dict[str, Any] = {"env": spec.env} if spec.env else {}
+    group = network_group(cluster.id)
     try:
-        for index, identity in enumerate(plan.identities):
+        for index, credential in enumerate(credentials):
+            aliases = [node_alias(index)]
+            if index == 0:
+                aliases.append(SCHEDULER_ALIAS)
             info = client.run_job(
                 image=spec.image,
                 command=command
-                + ["--mesh", configuration, "--node", str(index)]
+                + ["--cluster", configuration, "--node", str(index)]
                 + (["--scheduler-worker"] if scheduler_worker else []),
                 flavor=plan.node_flavors[index],
                 namespace=spec.namespace,
                 timeout=spec.timeout,
                 volumes=spec.volumes,
                 **environment_kwargs,
-                secrets={"HFDASK_NODE_KEY": identity.secret.hex()},
+                secrets=credential.job_secrets(),
+                ssh=plan.persistent and index == 0,
+                network_group=group,
+                network_aliases=aliases,
                 labels={"hfdask-cluster": cluster.id, "hfdask-node": str(index)},
             )
             cluster.jobs.append(Job(info.id, spec.namespace, client))
@@ -407,11 +369,7 @@ def submit_cluster(
 
 def boot_cluster(
     spec: JobSpec,
-    identities: Sequence[Identity],
     *,
-    client_identity: Identity,
-    public_relays: bool = False,
-    relay_urls: Sequence[str] = (),
     startup_timeout: int = 1200,
     scheduler_worker: bool = False,
     scheduler_flavor: str | None = None,
@@ -424,11 +382,6 @@ def boot_cluster(
 
     Args:
         spec: Job configuration with empty `entrypoint` and `kwargs`.
-        identities: Distinct Job identities in scheduler-first order.
-        client_identity: Separate identity authorized to connect to this cluster.
-            Retain its private key separately from the public manifest.
-        public_relays: Explicit consent to public discovery and relay use.
-        relay_urls: Optional custom relays; public n0 discovery is still used.
         startup_timeout: Positive worker-readiness timeout in seconds.
         scheduler_worker: Enable workers on the scheduler machine as well.
         scheduler_flavor: Scheduler hardware override, defaulting to `spec.flavor`.
@@ -438,24 +391,22 @@ def boot_cluster(
         on_submitted: Callback for saving the growing cluster's recovery manifest.
 
     Returns:
-        A `Cluster` with public connection metadata. Use `hfdask.client.connect`
-        with its manifest and the client identity to wait for readiness and run tasks.
+        A `Cluster` with public connection metadata and a private
+        `client_credentials` mTLS identity. Save the credentials separately from its
+        manifest, then use both with `hfdask.client.connect`.
 
     Raises:
         ValueError: If the persistent workload or launch configuration is invalid.
         LaunchError: If submission or the callback fails; known handles are retained.
 
-    Placement and identity-count rules match `submit_cluster`. Disconnecting a
+    Placement and Job-count rules match `submit_cluster`. Disconnecting a
     client does not release paid Jobs; explicitly call `Cluster.close` and retain
     recovery handles until termination is verified.
     """
     PersistentWorkloadConfig(entrypoint=spec.entrypoint, kwargs=spec.kwargs)
     return submit_cluster(
         spec,
-        identities,
-        _client_identity=client_identity,
-        public_relays=public_relays,
-        relay_urls=relay_urls,
+        _persistent=True,
         startup_timeout=startup_timeout,
         scheduler_worker=scheduler_worker,
         scheduler_flavor=scheduler_flavor,

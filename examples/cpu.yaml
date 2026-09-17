@@ -13,6 +13,3 @@ environment:
   groups: [deploy]
 
 timeout: 15m
-
-network:
-  public_relays: true

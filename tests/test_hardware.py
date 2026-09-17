@@ -6,10 +6,7 @@ from hfdask.hardware import (
     GIB,
     _limits,
     gpu_inventory,
-    nanny_service,
-    service_owners,
     worker_profiles,
-    worker_service,
 )
 from hfdask.routing import submit_on, workers_with
 from hfdask.runner import wait_topology
@@ -116,24 +113,6 @@ def test_gpu_visibility(monkeypatch):
         gpu_inventory()
 
 
-def test_service_layout():
-    workers_per_node = (0, 2, 1, 3)
-    owners = service_owners(workers_per_node)
-    seen = {0}
-    for node, count in enumerate(workers_per_node):
-        for ordinal in range(count):
-            for service in (
-                worker_service(workers_per_node, node, ordinal),
-                nanny_service(workers_per_node, node, ordinal),
-            ):
-                assert service not in seen
-                assert owners[service] == node
-                seen.add(service)
-    assert seen == set(range(len(owners)))
-    assert worker_service((0, 32), 1, 31) == 63
-    assert nanny_service((0, 32), 1, 31) == 64
-
-
 def test_category_routing():
     client = MagicMock()
     client.scheduler_info.return_value = {
@@ -155,9 +134,9 @@ def test_topology_requires_every_detected_worker():
     info = {"node": 1, "workers_on_node": 2}
     client.scheduler_info.return_value = {"workers": {"first": {"hfdask": info}}}
     with pytest.raises(TimeoutError):
-        wait_topology(client, (0, 2), 0)
+        wait_topology(client, 2, 0, 0)
     client.scheduler_info.return_value["workers"]["second"] = {"hfdask": info}
-    wait_topology(client, (0, 2), 0)
+    assert wait_topology(client, 2, 0, 0) == (0, 2)
 
 
 def test_real_nanny_metadata_and_routing():
@@ -186,7 +165,7 @@ def test_real_nanny_metadata_and_routing():
 
             def compute():
                 with Client(scheduler.address, set_as_default=False) as client:
-                    wait_topology(client, (0, 1), 10)
+                    wait_topology(client, 2, 0, 10)
                     assert (
                         submit_on(
                             client, abs, -7, tags={"FLAVOR_test"}, resources={"CPU_THREADS": 1}

@@ -7,8 +7,8 @@ locked Git project and runs an ordinary Python script from a YAML definition.
 ## Module reference
 
 - [Jobs](hfdask/jobs.html) — workload specifications and single-Job lifecycle
-- [Clusters](hfdask/cluster.html) — worker groups, identities, launch, and recovery
-- [Clients](hfdask/client.html) — persistent Dask connections over the encrypted mesh
+- [Clusters](hfdask/cluster.html) — worker groups, mTLS launch, and recovery
+- [Clients](hfdask/client.html) — persistent Dask connections over HF SSH and mTLS
 - [Routing](hfdask/routing.html) — categorical worker affinity and resource reservations
 - [Configuration](hfdask/config.html) — strict input schemas and validation contracts
 - [CLI](hfdask/cli.html) — source packaging, staging, and script submission

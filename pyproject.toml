@@ -12,10 +12,10 @@ license = "Apache-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
-    "huggingface-hub>=1.29,<2",
+    "huggingface-hub>=1.32,<2",
     "dask[distributed]>=2025.1,<2027",
+    "cryptography>=45,<51",
     "PyYAML>=6,<7",
-    "iroh==1.1.0",
     "pydantic>=2.12,<3",
 ]
 
@@ -27,6 +27,9 @@ Issues = "https://github.com/Hanno-Labs/hfdask/issues"
 [project.scripts]
 hfdask = "hfdask.cli:main"
 hfdask-runner = "hfdask.runner:main"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [dependency-groups]
 docs = ["pdoc>=15"]
